@@ -87,6 +87,10 @@ class ExpenseParser:
             'flexible_transaction': r'(\d{1,2}/\d{1,2})\s+(.+?)\s+([-+]?\$?\d+\.\d{2})',
             'amount_only': r'([-+]?\$?\d+\.\d{2})',
             'date_only': r'(\d{1,2}/\d{1,2})',
+            # Very flexible patterns for different Chase layouts
+            'any_date_amount': r'(\d{1,2}[/-]\d{1,2})\s+(.+?)\s+([-+]?\$?\d+\.\d{2})',
+            'amount_with_description': r'([-+]?\$?\d+\.\d{2})\s+(.+)',
+            'description_with_amount': r'(.+?)\s+([-+]?\$?\d+\.\d{2})',
         }
 
         # Waluty międzynarodowe
@@ -252,16 +256,46 @@ class ExpenseParser:
         lines = text.split('\n')
         
         print(f"🏦 Parsing Chase bank statement with {len(lines)} lines")
+        print(f"🏦 First 5 lines for debugging:")
+        for i, line in enumerate(lines[:5]):
+            print(f"  Line {i}: '{line}'")
         
         for line_num, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
+            
+            # Debug: Show lines that might contain transactions
+            if re.search(r'\d+\.\d{2}', line) or re.search(r'\d{1,2}[/-]\d{1,2}', line):
+                print(f"🔍 Potential transaction line {line_num}: '{line}'")
                 
-            # Chase format: MM/DD Description Amount
-            chase_match = re.search(self.chase_patterns['transaction_line'], line)
+            # Try multiple Chase patterns for better compatibility
+            chase_match = None
+            pattern_used = None
+            
+            # Try different patterns in order of preference
+            for pattern_name, pattern in self.chase_patterns.items():
+                if pattern_name in ['transaction_line', 'any_date_amount', 'flexible_transaction']:
+                    chase_match = re.search(pattern, line)
+                    if chase_match:
+                        pattern_used = pattern_name
+                        break
+            
             if chase_match:
-                date_str, description, amount_str = chase_match.groups()
+                if len(chase_match.groups()) == 3:
+                    date_str, description, amount_str = chase_match.groups()
+                elif len(chase_match.groups()) == 2:
+                    # Handle patterns with only 2 groups
+                    if 'amount_with_description' in pattern_used:
+                        amount_str, description = chase_match.groups()
+                        date_str = None
+                    elif 'description_with_amount' in pattern_used:
+                        description, amount_str = chase_match.groups()
+                        date_str = None
+                    else:
+                        continue
+                else:
+                    continue
                 
                 # Parse amount
                 amount_str = amount_str.replace('$', '').replace(',', '')
@@ -271,13 +305,17 @@ class ExpenseParser:
                     continue
                 
                 # Parse date (MM/DD format, assume current year)
-                try:
-                    current_year = datetime.now().year
-                    full_date = f"{date_str}/{current_year}"
-                    parsed_date = datetime.strptime(full_date, '%m/%d/%Y')
-                    date_formatted = parsed_date.strftime('%Y-%m-%d')
-                except ValueError:
-                    date_formatted = datetime.now().strftime('%Y-%m-%d')
+                date_formatted = datetime.now().strftime('%Y-%m-%d')  # Default to today
+                if date_str:
+                    try:
+                        # Handle different date separators
+                        date_str = date_str.replace('-', '/')
+                        current_year = datetime.now().year
+                        full_date = f"{date_str}/{current_year}"
+                        parsed_date = datetime.strptime(full_date, '%m/%d/%Y')
+                        date_formatted = parsed_date.strftime('%Y-%m-%d')
+                    except ValueError:
+                        pass  # Keep default date
                 
                 # Clean description
                 description = description.strip()
@@ -294,7 +332,7 @@ class ExpenseParser:
                 }
                 
                 transactions.append(transaction)
-                print(f"✓ Found Chase transaction: {date_formatted} - {description} - ${amount}")
+                print(f"✓ Found Chase transaction ({pattern_used}): {date_formatted} - {description} - ${amount}")
         
         print(f"🏦 Chase parsing complete: {len(transactions)} transactions found")
         return transactions
