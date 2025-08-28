@@ -6,6 +6,7 @@ from flask_cors import CORS
 import os
 import tempfile
 from datetime import datetime
+import pandas as pd
 from pdf_expense_parser import UniversalPDFParser
 
 app = Flask(__name__)
