@@ -110,7 +110,7 @@ class UniversalPDFParser:
         return structured_data
 
     def _is_non_transaction_line(self, line: str) -> bool:
-        """Check if line should be skipped - enhanced filtering for Chase statements"""
+        """Check if line should be skipped - comprehensive filtering for Chase statements"""
         line_upper = line.upper()
         
         # Skip these types of lines - comprehensive filtering
@@ -155,6 +155,11 @@ class UniversalPDFParser:
             # Empty or very short lines
             r'^\s*$',  # Empty lines
             r'^[A-Z\s]{1,3}$',  # Very short all caps
+            
+            # Additional garbage patterns
+            r'^\d{5,}$',  # Just numbers (5+ digits)
+            r'^[A-Z\s]{20,}$',  # Very long all caps text
+            r'^[A-Z\s]+\d{5,}',  # Text followed by many numbers
         ]
         
         for pattern in skip_patterns:
@@ -164,39 +169,35 @@ class UniversalPDFParser:
         return False
 
     def _looks_like_transaction(self, line: str) -> bool:
-        """Check if line looks like a transaction - balanced filtering for Chase"""
+        """Check if line looks like a transaction - strict filtering for Chase"""
         # Must have sufficient text for a real transaction
-        has_text = len(line.split()) >= 3  # At least 3 words (reduced from 4)
+        has_text = len(line.split()) >= 4  # At least 4 words for real transactions
         
-        # Must have a valid date format
+        # MUST have a valid date format (required for transactions)
         has_valid_date = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)) or \
                         bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)) or \
                         bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
         
-        # Must have Chase transaction keywords OR look like a transaction pattern
+        # Must have Chase transaction keywords
         chase_transaction_keywords = [
             'Direct Deposit', 'ATM', 'Cash', 'Deposit', 'Withdraw', 'Card Purchase', 
             'Payment Sent', 'Square Inc', 'Recurring', 'With Pin', 'CA Card', 'Confirmation',
             'Check Deposit', 'Electronic Deposit', 'ACH', 'Credit', 'Debit', 'Purchase',
-            'Transfer', 'Online', 'PMT', 'Merchant', 'Service'
+            'Transfer', 'Online', 'PMT', 'Merchant', 'Service', 'VISA', 'Mastercard'
         ]
         has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_transaction_keywords)
-        
-        # Check for transaction patterns (date + text structure)
-        has_transaction_pattern = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}\s+[A-Z]', line)) or \
-                                 bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}\s+[A-Z]', line)) or \
-                                 bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+[A-Z]', line, re.IGNORECASE))
         
         # Must NOT contain obvious garbage indicators
         obvious_garbage_indicators = [
             'P O Box', 'Columbus OH', 'Deal and Hard', 'Para Espanol', 'International Calls',
             'Congratulations', 'thanks to your', 'waived', 'monthly service fee', 'cutoff time',
-            'Eastern Time', 'Minimum Daily Balance', 'Business Complete', 'aggregated spending'
+            'Eastern Time', 'Minimum Daily Balance', 'Business Complete', 'aggregated spending',
+            'NNNNNNNNNNN', 'T 1 000000000', 'DRE 021 142 30321'
         ]
         has_obvious_garbage = any(indicator.lower() in line.lower() for indicator in obvious_garbage_indicators)
         
-        # Line is a transaction if it has text AND (valid date OR Chase keywords OR transaction pattern) AND NO obvious garbage
-        return has_text and (has_valid_date or has_chase_keywords or has_transaction_pattern) and not has_obvious_garbage
+        # Line is a transaction if it has text AND valid date AND Chase keywords AND NO obvious garbage
+        return has_text and has_valid_date and has_chase_keywords and not has_obvious_garbage
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse transaction data - enhanced for Chase statements"""
@@ -376,7 +377,7 @@ class UniversalPDFParser:
         return f"{current_year}-{month_num}-{day_num}"
 
     def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Fallback extraction when no pattern matches - balanced filtering"""
+        """Fallback extraction when no pattern matches - strict filtering"""
         # Only process lines that look like real transactions
         if not self._looks_like_transaction(line):
             return None
@@ -388,7 +389,7 @@ class UniversalPDFParser:
         amount_match = re.search(r'[\d,]+\.?\d*', line)
         
         # If we have any date-like pattern and some text, create a transaction
-        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 3:
+        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 4:
             if date_match:
                 date = date_match.group()
             elif month_match:
@@ -417,21 +418,6 @@ class UniversalPDFParser:
             return {
                 'date': self._format_date(date),
                 'description': description if description else 'Transaction',
-                'amount': amount,
-                'amount_raw': str(amount),
-                'section': section,
-                'line_number': line_num,
-                'full_text': line
-            }
-        
-        # If still no match but line looks promising, create a basic entry
-        if len(line.split()) >= 3 and not self._is_non_transaction_line(line):
-            # Try to extract any amount from the line
-            amount = self._extract_amount_from_text(line)
-            
-            return {
-                'date': '',
-                'description': line,
                 'amount': amount,
                 'amount_raw': str(amount),
                 'section': section,
@@ -576,7 +562,7 @@ class UniversalPDFParser:
             return 0.0
 
     def create_dataframe(self, data: List[Dict[str, Any]]) -> pd.DataFrame:
-        """Create DataFrame with only essential columns: Date, Description, Amount"""
+        """Create DataFrame with only essential columns: Date, Description, Amount - enhanced formatting"""
         if not data:
             return pd.DataFrame()
         
@@ -602,11 +588,11 @@ class UniversalPDFParser:
         # Handle NaN values
         clean_df = clean_df.fillna('')
         
-        # Convert amount to numeric and remove decimals if they're 0
+        # Convert amount to numeric and format with commas and decimals
         if 'Amount' in clean_df.columns:
             clean_df['Amount'] = pd.to_numeric(clean_df['Amount'], errors='coerce').fillna(0)
-            # Remove .0 if amount is whole number
-            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: int(x) if x == int(x) else x)
+            # Format amounts with commas and 2 decimal places (e.g., 9549 -> 9,549.00)
+            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: f"{x:,.2f}" if x > 0 else "0.00")
         
         # Convert to strings for export
         for col in clean_df.columns:
