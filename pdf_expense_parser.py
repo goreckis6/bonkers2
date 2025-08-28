@@ -90,6 +90,7 @@ class UniversalPDFParser:
         try:
             # 1) Try layout-aware extraction first for best "line = Date Description Amount"
             structured_data: List[Dict[str, Any]] = []
+            text: str = ""
             layout_lines = self.extract_lines_with_layout(pdf_path)
             if layout_lines:
                 structured_data = self._extract_from_lines_with_layout(layout_lines)
@@ -104,11 +105,13 @@ class UniversalPDFParser:
             if not structured_data:
                 return {'success': False, 'error': 'No structured data found'}
             
+            # Compute text length from whichever source we used
+            text_source = text if text else "\n".join(layout_lines)
             return {
                 'success': True,
                 'structured_data': structured_data,
                 'total_lines': len(structured_data),
-                'text_length': len(text)
+                'text_length': len(text_source)
             }
             
         except Exception as e:
