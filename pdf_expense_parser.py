@@ -1,233 +1,347 @@
 # Universal PDF Parser - Converts ANY PDF to Structured Data
 # Fast conversion to Excel/CSV format with columns and rows
 
+import PyPDF2
 import re
 import pandas as pd
-import numpy as np
-from datetime import datetime
-from typing import List, Dict, Optional, Tuple
-import warnings
-warnings.filterwarnings('ignore')
+from typing import List, Dict, Any, Optional
 
 class UniversalPDFParser:
     def __init__(self):
-        """Universal PDF parser for any type of document"""
-        # Common data patterns to look for
-        self.data_patterns = {
-            'amounts': [
-                r'[-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2}',  # $1,234.56 or 1234.56
-                r'[-+]?\d+\.\d{2}',  # 123.45
-                r'[-+]?\d+',  # 123
-            ],
-            'dates': [
-                r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY
-                r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD
-                r'\d{1,2}\.\d{1,2}\.\d{4}',  # MM.DD.YYYY
-            ],
-            'emails': [
-                r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-            ],
-            'phones': [
-                r'\+?1?[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}'
-            ]
+        # Enhanced patterns for banking data
+        self.amount_patterns = [
+            r'\$?[\d,]+\.?\d*',  # $1,234.56 or 1234.56
+            r'[\d,]+\.?\d*',     # 1,234.56 or 1234.56
+            r'[-+]?\d+\.?\d*',   # -123.45 or +123.45
+        ]
+        
+        self.date_patterns = [
+            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY
+            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD
+            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',  # DD MMM YYYY
+        ]
+        
+        self.email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        self.phone_pattern = r'[\+]?[1-9][\d]{0,15}'
+        
+        # Chase-specific patterns
+        self.chase_section_patterns = {
+            'withdrawals': r'WITHDRAWALS|DEBITS|CHARGES',
+            'deposits': r'DEPOSITS|ADDITIONS|CREDITS',
+            'balance': r'BALANCE|ACCOUNT\s+SUMMARY|ENDING\s+BALANCE',
+            'transactions': r'TRANSACTIONS|ACTIVITY|SUMMARY'
         }
+        
+        self.chase_transaction_patterns = [
+            # Date Description Amount
+            r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([\d,]+\.?\d*)',
+            # Date Description Ref Amount
+            r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([A-Z0-9]+)\s+([\d,]+\.?\d*)',
+            # Description Date Amount
+            r'(.+?)\s+(\d{1,2}/\d{1,2}/\d{4})\s+([\d,]+\.?\d*)',
+        ]
+        
+        self.currency_symbols = ['$', '€', '£', '¥', '₽', '₹', '₩', '₪', '₦', '₨', '₴', '₸', '₺', '₼', '₾', '₿']
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Extract text from PDF file"""
+        """Extract text from PDF using PyPDF2"""
         try:
-            import PyPDF2
-            
-            text = ""
             with open(pdf_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
+                text = ""
                 for page in pdf_reader.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        text += page_text + "\n"
-            
-            return text
-        except ImportError:
-            raise Exception("PyPDF2 not installed. Use: pip install PyPDF2")
+                    text += page.extract_text() + "\n"
+                return text
         except Exception as e:
-            raise Exception(f"Error reading PDF: {str(e)}")
+            print(f"Error extracting text from PDF: {e}")
+            return ""
 
-    def parse_pdf_to_structured_data(self, pdf_path: str) -> Dict:
-        """Main function: Parse ANY PDF to structured data"""
+    def parse_pdf_to_structured_data(self, pdf_path: str) -> Dict[str, Any]:
+        """Parse PDF and return structured data with enhanced banking support"""
         try:
-            # Extract text from PDF
             text = self.extract_text_from_pdf(pdf_path)
-            
             if not text.strip():
-                return {
-                    'error': 'No text found in PDF',
-                    'fileName': pdf_path.split('/')[-1],
-                    'success': False
-                }
+                return {'success': False, 'error': 'No text extracted from PDF'}
             
-            print(f"📄 PDF loaded: {len(text)} characters")
-            print(f"📄 First 200 chars: {text[:200]}...")
+            # Enhanced parsing for banking documents
+            structured_data = self._extract_structured_data_enhanced(text)
             
-            # Parse the text into structured data
-            structured_data = self._extract_structured_data(text)
+            if not structured_data:
+                return {'success': False, 'error': 'No structured data found'}
             
             return {
-                'structured_data': structured_data,
-                'raw_text': text,
-                'fileName': pdf_path.split('/')[-1],
                 'success': True,
-                'total_rows': len(structured_data)
+                'structured_data': structured_data,
+                'total_lines': len(structured_data),
+                'text_length': len(text)
             }
             
         except Exception as e:
-            return {
-                'error': str(e),
-                'fileName': pdf_path.split('/')[-1],
-                'success': False
-            }
+            return {'success': False, 'error': str(e)}
 
-    def _extract_structured_data(self, text: str) -> List[Dict]:
-        """Extract structured data from text"""
+    def _extract_structured_data_enhanced(self, text: str) -> List[Dict[str, Any]]:
+        """Enhanced extraction with banking section recognition"""
         lines = text.split('\n')
         structured_data = []
-        
-        print(f"🔍 Processing {len(lines)} lines...")
+        current_section = 'general'
+        section_data = []
         
         for line_num, line in enumerate(lines):
             line = line.strip()
-            if not line or len(line) < 3:
+            if not line:
                 continue
             
-            # Extract data from this line
-            row_data = self._extract_line_data(line, line_num)
-            if row_data:
-                structured_data.append(row_data)
+            # Detect banking sections
+            detected_section = self._detect_banking_section(line)
+            if detected_section:
+                current_section = detected_section
+                print(f"🔍 Detected section: {current_section}")
+                continue
+            
+            # Parse line based on current section
+            parsed_line = self._parse_line_by_section(line, current_section, line_num)
+            if parsed_line:
+                parsed_line['section'] = current_section
+                parsed_line['line_number'] = line_num
+                structured_data.append(parsed_line)
         
-        print(f"✅ Extracted {len(structured_data)} structured rows")
         return structured_data
 
-    def _extract_line_data(self, line: str, line_num: int) -> Optional[Dict]:
-        """Extract data from a single line"""
-        try:
-            # Look for amounts
-            amounts = []
-            for pattern in self.data_patterns['amounts']:
-                matches = re.findall(pattern, line)
-                amounts.extend([float(match.replace('$', '').replace(',', '')) for match in matches])
-            
-            # Look for dates
-            dates = []
-            for pattern in self.data_patterns['dates']:
-                matches = re.findall(pattern, line)
-                dates.extend(matches)
-            
-            # Look for emails
-            emails = []
-            for pattern in self.data_patterns['emails']:
-                matches = re.findall(pattern, line)
-                emails.extend(matches)
-            
-            # Look for phones
-            phones = []
-            for pattern in self.data_patterns['phones']:
-                matches = re.findall(pattern, line)
-                phones.extend(matches)
-            
-            # Create row data
-            row_data = {
-                'line_number': line_num + 1,
-                'raw_text': line,
-                'amounts': amounts,
-                'dates': dates,
-                'emails': emails,
-                'phones': phones,
-                'word_count': len(line.split()),
-                'has_numbers': bool(re.search(r'\d', line)),
-                'has_currency': bool(re.search(r'[\$€£¥]', line))
-            }
-            
-            # Add extracted values as separate columns
-            if amounts:
-                row_data['primary_amount'] = amounts[0]
-                row_data['all_amounts'] = amounts
-            if dates:
-                row_data['primary_date'] = dates[0]
-                row_data['all_dates'] = dates
-            if emails:
-                row_data['primary_email'] = emails[0]
-                row_data['all_emails'] = emails
-            if phones:
-                row_data['primary_phone'] = phones[0]
-                row_data['all_phones'] = phones
-            
-            return row_data
-            
-        except Exception as e:
-            print(f"❌ Error processing line {line_num}: {e}")
-            return None
+    def _detect_banking_section(self, line: str) -> Optional[str]:
+        """Detect banking document sections"""
+        line_upper = line.upper()
+        
+        for section, pattern in self.chase_section_patterns.items():
+            if re.search(pattern, line_upper, re.IGNORECASE):
+                return section
+        
+        return None
 
-    def create_dataframe(self, structured_data: List[Dict]) -> pd.DataFrame:
-        """Convert structured data to pandas DataFrame"""
-        if not structured_data:
+    def _parse_line_by_section(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
+        """Parse line based on detected banking section"""
+        if section in ['withdrawals', 'deposits']:
+            return self._parse_transaction_line(line, section)
+        elif section == 'balance':
+            return self._parse_balance_line(line)
+        else:
+            return self._parse_general_line(line, line_num)
+
+    def _parse_transaction_line(self, line: str, section: str) -> Optional[Dict[str, Any]]:
+        """Parse transaction lines (withdrawals/deposits)"""
+        for pattern in self.chase_transaction_patterns:
+            match = re.search(pattern, line)
+            if match:
+                groups = match.groups()
+                
+                if len(groups) == 3:  # Date Description Amount
+                    date, description, amount = groups
+                    return {
+                        'transaction_type': section,
+                        'date': date.strip(),
+                        'description': description.strip(),
+                        'amount': self._parse_amount(amount),
+                        'amount_raw': amount,
+                        'ref_number': '',
+                        'full_text': line,
+                        'has_amount': True,
+                        'has_date': True,
+                        'word_count': len(line.split())
+                    }
+                elif len(groups) == 4:  # Date Description Ref Amount
+                    date, description, ref, amount = groups
+                    return {
+                        'transaction_type': section,
+                        'date': date.strip(),
+                        'description': description.strip(),
+                        'amount': self._parse_amount(amount),
+                        'amount_raw': amount,
+                        'ref_number': ref.strip(),
+                        'full_text': line,
+                        'has_amount': True,
+                        'has_date': True,
+                        'word_count': len(line.split())
+                    }
+        
+        # Fallback: try to extract any recognizable data
+        return self._parse_general_line(line, 0)
+
+    def _parse_balance_line(self, line: str) -> Optional[Dict[str, Any]]:
+        """Parse balance-related lines"""
+        # Look for balance amounts
+        amount_match = re.search(r'[\d,]+\.?\d*', line)
+        if amount_match:
+            return {
+                'transaction_type': 'balance',
+                'date': '',
+                'description': line,
+                'amount': self._parse_amount(amount_match.group()),
+                'amount_raw': amount_match.group(),
+                'ref_number': '',
+                'full_text': line,
+                'has_amount': True,
+                'has_date': False,
+                'word_count': len(line.split())
+            }
+        return None
+
+    def _parse_general_line(self, line: str, line_num: int) -> Dict[str, Any]:
+        """Parse general lines with enhanced banking support"""
+        # Extract amounts
+        amounts = []
+        for pattern in self.amount_patterns:
+            found = re.findall(pattern, line)
+            amounts.extend(found)
+        
+        # Extract dates
+        dates = []
+        for pattern in self.date_patterns:
+            found = re.findall(pattern, line)
+            dates.extend(found)
+        
+        # Extract emails
+        emails = re.findall(self.email_pattern, line)
+        
+        # Extract phones
+        phones = re.findall(self.phone_pattern, line)
+        
+        # Check for currency symbols
+        has_currency = any(symbol in line for symbol in self.currency_symbols)
+        
+        # Check for numbers
+        has_numbers = bool(re.search(r'\d', line))
+        
+        # Word count
+        word_count = len(line.split())
+        
+        return {
+            'transaction_type': 'general',
+            'date': dates[0] if dates else '',
+            'description': line,
+            'amount': self._parse_amount(amounts[0]) if amounts else 0,
+            'amount_raw': amounts[0] if amounts else '',
+            'ref_number': '',
+            'full_text': line,
+            'amounts': amounts,
+            'dates': dates,
+            'emails': emails,
+            'phones': phones,
+            'has_amount': bool(amounts),
+            'has_date': bool(dates),
+            'has_numbers': has_numbers,
+            'has_currency': has_currency,
+            'word_count': word_count
+        }
+
+    def _parse_amount(self, amount_str: str) -> float:
+        """Parse amount string to float"""
+        try:
+            # Remove currency symbols and commas
+            cleaned = re.sub(r'[^\d.-]', '', amount_str)
+            return float(cleaned) if cleaned else 0.0
+        except:
+            return 0.0
+
+    def create_dataframe(self, data: List[Dict[str, Any]]) -> pd.DataFrame:
+        """Create DataFrame with enhanced banking columns"""
+        if not data:
             return pd.DataFrame()
         
-        df = pd.DataFrame(structured_data)
+        # Convert to DataFrame
+        df = pd.DataFrame(data)
         
-        # Clean up the DataFrame
+        # Handle NaN values
         df = df.fillna('')
         
-        # Convert lists to strings for better Excel export
+        # Convert lists to strings for export
         for col in df.columns:
             if df[col].dtype == 'object':
-                df[col] = df[col].astype(str).str.replace('[', '').str.replace(']', '')
+                df[col] = df[col].astype(str)
         
         return df
 
-    def export_to_excel(self, structured_data: List[Dict], output_path: str):
-        """Export to Excel with multiple sheets"""
-        df = self.create_dataframe(structured_data)
+    def export_to_excel(self, data: List[Dict[str, Any]], filename: str = None) -> str:
+        """Export to Excel with enhanced banking sheets"""
+        df = self.create_dataframe(data)
         
         if df.empty:
-            raise Exception("No data to export")
+            raise ValueError("No data to export")
         
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        if not filename:
+            filename = f"enhanced_pdf_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
             # Main data sheet
             df.to_excel(writer, sheet_name='Extracted Data', index=False)
             
-            # Summary sheet
-            summary_data = [
-                ['Total Rows', len(df)],
-                ['Lines with Amounts', len(df[df['amounts'].str.len() > 0])],
-                ['Lines with Dates', len(df[df['dates'].str.len() > 0])],
-                ['Lines with Emails', len(df[df['emails'].str.len() > 0])],
-                ['Lines with Phones', len(df[df['phones'].str.len() > 0])],
-                ['Lines with Numbers', df['has_numbers'].sum()],
-                ['Lines with Currency', df['has_currency'].sum()],
-                ['Total Word Count', df['word_count'].sum()]
-            ]
-            
-            summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
-            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            # Banking summary sheet
+            self._create_banking_summary_sheet(writer, df)
             
             # Data types sheet
-            data_types = []
-            for col in df.columns:
-                non_empty = df[col].astype(str).str.strip().ne('').sum()
-                data_types.append([col, non_empty, len(df) - non_empty])
-            
-            types_df = pd.DataFrame(data_types, columns=['Column', 'Non-Empty', 'Empty'])
-            types_df.to_excel(writer, sheet_name='Data Types', index=False)
+            self._create_data_types_sheet(writer, df)
         
-        print(f"✅ Excel file exported: {output_path}")
+        return filename
 
-    def export_to_csv(self, structured_data: List[Dict], output_path: str):
+    def _create_banking_summary_sheet(self, writer, df: pd.DataFrame):
+        """Create banking-specific summary sheet"""
+        summary_data = []
+        
+        # Section breakdown
+        if 'section' in df.columns:
+            section_counts = df['section'].value_counts()
+            for section, count in section_counts.items():
+                summary_data.append(['Section', section, count])
+        
+        # Transaction type breakdown
+        if 'transaction_type' in df.columns:
+            type_counts = df['transaction_type'].value_counts()
+            for trans_type, count in type_counts.items():
+                summary_data.append(['Transaction Type', trans_type, count])
+        
+        # Amount statistics
+        if 'amount' in df.columns:
+            amounts = pd.to_numeric(df['amount'], errors='coerce').dropna()
+            if not amounts.empty:
+                summary_data.extend([
+                    ['Total Amount', 'Sum', amounts.sum()],
+                    ['Average Amount', 'Mean', amounts.mean()],
+                    ['Largest Amount', 'Max', amounts.max()],
+                    ['Smallest Amount', 'Min', amounts.min()]
+                ])
+        
+        # Date range
+        if 'date' in df.columns:
+            valid_dates = pd.to_datetime(df['date'], errors='coerce').dropna()
+            if not valid_dates.empty:
+                summary_data.extend([
+                    ['Date Range', 'Start', valid_dates.min().strftime('%Y-%m-%d')],
+                    ['Date Range', 'End', valid_dates.max().strftime('%Y-%m-%d')]
+                ])
+        
+        summary_df = pd.DataFrame(summary_data, columns=['Category', 'Value', 'Count'])
+        summary_df.to_excel(writer, sheet_name='Banking Summary', index=False)
+
+    def _create_data_types_sheet(self, writer, df: pd.DataFrame):
+        """Create data types analysis sheet"""
+        data_types = []
+        for col in df.columns:
+            non_empty = df[col].astype(str).str.strip().ne('').sum()
+            data_types.append([col, non_empty, len(df) - non_empty])
+        
+        types_df = pd.DataFrame(data_types, columns=['Column', 'Non-Empty', 'Empty'])
+        types_df.to_excel(writer, sheet_name='Data Types', index=False)
+
+    def export_to_csv(self, data: List[Dict[str, Any]], filename: str = None) -> str:
         """Export to CSV"""
-        df = self.create_dataframe(structured_data)
+        df = self.create_dataframe(data)
         
         if df.empty:
-            raise Exception("No data to export")
+            raise ValueError("No data to export")
         
-        df.to_csv(output_path, index=False, encoding='utf-8-sig')
-        print(f"✅ CSV file exported: {output_path}")
+        if not filename:
+            filename = f"enhanced_pdf_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        df.to_csv(filename, index=False, encoding='utf-8-sig')
+        return filename
 
 def main():
     """Example usage"""
@@ -243,7 +357,7 @@ def main():
         result = parser.parse_pdf_to_structured_data(pdf_file)
         
         if result['success']:
-            print(f"✅ Successfully parsed {result['total_rows']} rows")
+            print(f"✅ Successfully parsed {result['total_lines']} lines")
             
             # Export to Excel and CSV
             parser.export_to_excel(result['structured_data'], 'extracted_data.xlsx')
