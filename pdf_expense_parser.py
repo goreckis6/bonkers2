@@ -150,45 +150,6 @@ class UniversalPDFParser:
         # Line is a transaction if it has text AND (date OR amount OR currency)
         return has_text and (has_date or has_amount or has_currency)
 
-    def _parse_transaction_line(self, line: str, section: str) -> Optional[Dict[str, Any]]:
-        """Parse transaction lines (withdrawals/deposits) - improved amount extraction"""
-        for pattern in self.chase_transaction_patterns:
-            match = re.search(pattern, line)
-            if match:
-                groups = match.groups()
-                
-                if len(groups) == 3:  # Date Description Amount
-                    date, description, amount = groups
-                    return {
-                        'transaction_type': section,
-                        'date': self._format_date(date.strip()),
-                        'description': description.strip(),
-                        'amount': self._parse_amount(amount),
-                        'amount_raw': amount,
-                        'ref_number': '',
-                        'full_text': line,
-                        'has_amount': True,
-                        'has_date': True,
-                        'word_count': len(line.split())
-                    }
-                elif len(groups) == 4:  # Date Description Ref Amount
-                    date, description, ref, amount = groups
-                    return {
-                        'transaction_type': section,
-                        'date': self._format_date(date.strip()),
-                        'description': f"{description.strip()} (Ref: {ref.strip()})",
-                        'amount': self._parse_amount(amount),
-                        'amount_raw': amount,
-                        'ref_number': ref.strip(),
-                        'full_text': line,
-                        'has_amount': True,
-                        'has_date': True,
-                        'word_count': len(line.split())
-                    }
-        
-        # Fallback: try to extract any recognizable data
-        return self._parse_general_line(line, 0)
-
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse transaction data - improved amount extraction and date formatting"""
         
@@ -407,7 +368,7 @@ class UniversalPDFParser:
             return self._parse_general_line(line, line_num)
 
     def _parse_transaction_line(self, line: str, section: str) -> Optional[Dict[str, Any]]:
-        """Parse transaction lines (withdrawals/deposits)"""
+        """Parse transaction lines (withdrawals/deposits) - improved amount extraction"""
         for pattern in self.chase_transaction_patterns:
             match = re.search(pattern, line)
             if match:
@@ -417,7 +378,7 @@ class UniversalPDFParser:
                     date, description, amount = groups
                     return {
                         'transaction_type': section,
-                        'date': date.strip(),
+                        'date': self._format_date(date.strip()),
                         'description': description.strip(),
                         'amount': self._parse_amount(amount),
                         'amount_raw': amount,
@@ -431,8 +392,8 @@ class UniversalPDFParser:
                     date, description, ref, amount = groups
                     return {
                         'transaction_type': section,
-                        'date': date.strip(),
-                        'description': description.strip(),
+                        'date': self._format_date(date.strip()),
+                        'description': f"{description.strip()} (Ref: {ref.strip()})",
                         'amount': self._parse_amount(amount),
                         'amount_raw': amount,
                         'ref_number': ref.strip(),
@@ -624,25 +585,24 @@ class UniversalPDFParser:
         return filename
 
 def main():
-    """Example usage"""
+    """Test the parser"""
     parser = UniversalPDFParser()
     
-    # Test with a PDF file
-    pdf_file = 'test.pdf'  # Replace with your PDF path
+    # Test with a sample PDF
+    pdf_path = "test.pdf"  # Replace with actual PDF path
     
     try:
-        print("🚀 Starting universal PDF parsing...")
-        
-        # Parse PDF to structured data
-        result = parser.parse_pdf_to_structured_data(pdf_file)
+        result = parser.parse_pdf_to_structured_data(pdf_path)
         
         if result['success']:
             print(f"✅ Successfully parsed {result['total_lines']} lines")
             
             # Export to Excel and CSV
-            parser.export_to_excel(result['structured_data'], 'extracted_data.xlsx')
-            parser.export_to_csv(result['structured_data'], 'extracted_data.csv')
+            excel_file = parser.export_to_excel(result['structured_data'])
+            csv_file = parser.export_to_csv(result['structured_data'])
             
+            print(f"✅ Excel exported: {excel_file}")
+            print(f"✅ CSV exported: {csv_file}")
         else:
             print(f"❌ Error: {result['error']}")
             
