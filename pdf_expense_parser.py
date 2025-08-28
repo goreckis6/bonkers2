@@ -28,6 +28,14 @@ class ExpenseParser:
             # Wyciągi bankowe - różne formaty
             r'(?:debit|credit|amount|kwota):?\s*[-+]?(\d+[.,]\d{2})',
             r'[-+]?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})',  # Duże kwoty z separatorami tysięcy
+            
+            # Dodatkowe wzorce dla wyciągów bankowych z spacjami
+            r'[-+]?(\d+\s+\d{2})\s*(?:usd|eur|pln|gbp)?',  # "132 47" -> "132.47"
+            r'[-+]?(\d+\.\d{2})\s*(?:usd|eur|pln|gbp)?',  # "132.47" -> "132.47"
+            
+            # Chase-specific patterns
+            r'[-+]?\$?(\d+\.\d{2})',  # $132.47 or 132.47
+            r'[-+]?(\d+\.\d{2})\s*\$?',  # 132.47$ or 132.47
         ]
         
         self.date_patterns = [
@@ -68,6 +76,17 @@ class ExpenseParser:
             'atm': r'(?:atm|bankomat|geldautomat)',
             'direct_debit': r'(?:direct debit|polecenie zapłaty|lastschrift)',
             'standing_order': r'(?:standing order|zlecenie stałe|dauerauftrag)',
+        }
+        
+        # Enhanced patterns specifically for Chase Bank
+        self.chase_patterns = {
+            'transaction_line': r'(\d{2}/\d{2})\s+(.+?)\s+([-+]?\$?\d+\.\d{2})',
+            'date_amount': r'(\d{2}/\d{2})\s+.*?([-+]?\$?\d+\.\d{2})',
+            'description': r'\d{2}/\d{2}\s+(.+?)\s+[-+]?\$?\d+\.\d{2}',
+            # More flexible patterns for different Chase formats
+            'flexible_transaction': r'(\d{1,2}/\d{1,2})\s+(.+?)\s+([-+]?\$?\d+\.\d{2})',
+            'amount_only': r'([-+]?\$?\d+\.\d{2})',
+            'date_only': r'(\d{1,2}/\d{1,2})',
         }
 
         # Waluty międzynarodowe
@@ -121,7 +140,12 @@ class ExpenseParser:
                 amount_str = matches[-1]
                 # Usuń symbole walut z kwoty
                 amount_str = re.sub(r'[€$£¥₹]', '', amount_str).strip()
+                
+                # Normalizuj separatory dziesiętne - zamień przecinki na kropki
                 amount_str = amount_str.replace(',', '.')
+                
+                # Usuń spacje w środku liczby (np. "132 47" -> "132.47")
+                amount_str = re.sub(r'(\d+)\s+(\d+)', r'\1.\2', amount_str)
                 
                 try:
                     amount = float(amount_str)
@@ -164,7 +188,8 @@ class ExpenseParser:
         text_lower = text.lower()
         
         bank_keywords = ['bank statement', 'wyciąg bankowy', 'kontoauszug', 'relevé bancaire', 
-                        'account statement', 'transaction history', 'historia transakcji']
+                        'account statement', 'transaction history', 'historia transakcji',
+                        'chase', 'jpmorgan', 'checking account', 'savings account']
         invoice_keywords = ['faktura', 'invoice', 'rechnung', 'facture', 'bill']
         receipt_keywords = ['paragon', 'receipt', 'quittung', 'reçu', 'ricevuta']
         
@@ -181,6 +206,12 @@ class ExpenseParser:
         """Specjalne parsowanie wyciągów bankowych"""
         transactions = []
         lines = text.split('\n')
+        
+        # Check if this is a Chase bank statement
+        is_chase = 'chase' in text.lower() or 'jpmorgan' in text.lower()
+        
+        if is_chase:
+            return self.parse_chase_statement(text)
         
         for i, line in enumerate(lines):
             # Szukaj linii z datą i kwotą
@@ -213,6 +244,59 @@ class ExpenseParser:
                     }
                     transactions.append(transaction)
         
+        return transactions
+    
+    def parse_chase_statement(self, text: str) -> List[Dict]:
+        """Specialized parsing for Chase bank statements"""
+        transactions = []
+        lines = text.split('\n')
+        
+        print(f"🏦 Parsing Chase bank statement with {len(lines)} lines")
+        
+        for line_num, line in enumerate(lines):
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Chase format: MM/DD Description Amount
+            chase_match = re.search(self.chase_patterns['transaction_line'], line)
+            if chase_match:
+                date_str, description, amount_str = chase_match.groups()
+                
+                # Parse amount
+                amount_str = amount_str.replace('$', '').replace(',', '')
+                try:
+                    amount = abs(float(amount_str))  # Always positive for expenses
+                except ValueError:
+                    continue
+                
+                # Parse date (MM/DD format, assume current year)
+                try:
+                    current_year = datetime.now().year
+                    full_date = f"{date_str}/{current_year}"
+                    parsed_date = datetime.strptime(full_date, '%m/%d/%Y')
+                    date_formatted = parsed_date.strftime('%Y-%m-%d')
+                except ValueError:
+                    date_formatted = datetime.now().strftime('%Y-%m-%d')
+                
+                # Clean description
+                description = description.strip()
+                if len(description) < 3:
+                    description = "Chase Transaction"
+                
+                transaction = {
+                    'date': date_formatted,
+                    'amount': amount,
+                    'description': description,
+                    'currency': 'USD',
+                    'type': 'chase_transaction',
+                    'category': self.categorize_expense_advanced(description, amount, 'bank_statement')
+                }
+                
+                transactions.append(transaction)
+                print(f"✓ Found Chase transaction: {date_formatted} - {description} - ${amount}")
+        
+        print(f"🏦 Chase parsing complete: {len(transactions)} transactions found")
         return transactions
 
     def categorize_expense_advanced(self, description: str, amount: float, doc_type: str) -> str:
