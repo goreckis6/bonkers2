@@ -5,6 +5,10 @@ import PyPDF2
 import re
 import pandas as pd
 from typing import List, Dict, Any, Optional
+try:
+    import pdfplumber  # Layout-aware PDF text extraction
+except Exception:
+    pdfplumber = None
 
 class UniversalPDFParser:
     def __init__(self):
@@ -61,15 +65,41 @@ class UniversalPDFParser:
             print(f"Error extracting text from PDF: {e}")
             return ""
 
+    def extract_lines_with_layout(self, pdf_path: str) -> List[str]:
+        """Extract lines using pdfplumber to preserve layout and line integrity."""
+        if pdfplumber is None:
+            return []
+        lines: List[str] = []
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    # Tight tolerances to keep columns separate but join words on the same line
+                    text = page.extract_text(x_tolerance=1, y_tolerance=3) or ''
+                    if not text:
+                        continue
+                    for raw_line in text.split('\n'):
+                        line = (raw_line or '').strip()
+                        if line:
+                            lines.append(line)
+        except Exception as e:
+            print(f"Error extracting layout lines: {e}")
+        return lines
+
     def parse_pdf_to_structured_data(self, pdf_path: str) -> Dict[str, Any]:
         """Parse PDF and return structured data with enhanced banking support"""
         try:
-            text = self.extract_text_from_pdf(pdf_path)
-            if not text.strip():
-                return {'success': False, 'error': 'No text extracted from PDF'}
+            # 1) Try layout-aware extraction first for best "line = Date Description Amount"
+            structured_data: List[Dict[str, Any]] = []
+            layout_lines = self.extract_lines_with_layout(pdf_path)
+            if layout_lines:
+                structured_data = self._extract_from_lines_with_layout(layout_lines)
             
-            # Enhanced parsing for banking documents
-            structured_data = self._extract_structured_data_enhanced(text)
+            # 2) Fallback to simple text extraction if needed
+            if not structured_data:
+                text = self.extract_text_from_pdf(pdf_path)
+                if not text.strip():
+                    return {'success': False, 'error': 'No text extracted from PDF'}
+                structured_data = self._extract_structured_data_enhanced(text)
             
             if not structured_data:
                 return {'success': False, 'error': 'No structured data found'}
@@ -124,6 +154,37 @@ class UniversalPDFParser:
             if date_str and amount_num != 0.0:
                 filtered.append(row)
         
+        return filtered
+
+    def _extract_from_lines_with_layout(self, lines: List[str]) -> List[Dict[str, Any]]:
+        """Parse already line-broken text (layout-aware) into structured transactions only."""
+        structured_data: List[Dict[str, Any]] = []
+        current_section = 'general'
+        for line_num, raw_line in enumerate(lines):
+            line = (raw_line or '').strip()
+            if not line:
+                continue
+            if self._is_non_transaction_line(line):
+                continue
+            detected_section = self._detect_banking_section(line)
+            if detected_section:
+                current_section = detected_section
+                continue
+            if self._looks_like_transaction(line):
+                parsed_line = self._parse_transaction_only(line, current_section, line_num)
+                if parsed_line:
+                    structured_data.append(parsed_line)
+        # Keep only rows that have both a date and a non-zero amount
+        filtered: List[Dict[str, Any]] = []
+        for row in structured_data:
+            date_str = str(row.get('date') or '').strip()
+            amount_val = row.get('amount')
+            try:
+                amount_num = float(amount_val) if amount_val is not None else 0.0
+            except Exception:
+                amount_num = 0.0
+            if date_str and amount_num != 0.0:
+                filtered.append(row)
         return filtered
 
     def _is_non_transaction_line(self, line: str) -> bool:
