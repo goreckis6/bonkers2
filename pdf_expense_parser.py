@@ -133,13 +133,14 @@ class UniversalPDFParser:
         return False
 
     def _looks_like_transaction(self, line: str) -> bool:
-        """Check if line looks like a transaction - more permissive"""
+        """Check if line looks like a transaction - enhanced for Chase statements"""
         # More permissive: just needs some text and either date or amount
         has_text = len(line.split()) >= 2  # At least 2 words
         
-        # Check for various date formats
+        # Check for various date formats - enhanced
         has_date = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)) or \
-                   bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
+                   bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE)) or \
+                   bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line))  # YYYY-MM-DD format
         
         # Check for amounts
         has_amount = bool(re.search(r'[\d,]+\.?\d*', line))
@@ -147,13 +148,20 @@ class UniversalPDFParser:
         # Check for currency symbols
         has_currency = any(symbol in line for symbol in self.currency_symbols)
         
-        # Line is a transaction if it has text AND (date OR amount OR currency)
-        return has_text and (has_date or has_amount or has_currency)
+        # Check for Chase transaction keywords
+        chase_keywords = [
+            'ATM', 'Check', 'Electronic', 'Debit', 'Purchase', 'VISA', 'Transfer', 
+            'ACH', 'Deposit', 'Credit', 'Debit', 'Withdrawal', 'Online', 'PMT'
+        ]
+        has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_keywords)
+        
+        # Line is a transaction if it has text AND (date OR amount OR currency OR Chase keywords)
+        return has_text and (has_date or has_amount or has_currency or has_chase_keywords)
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Parse transaction data - improved amount extraction and date formatting"""
+        """Parse transaction data - enhanced for Chase statements"""
         
-        # Try different transaction patterns
+        # Enhanced transaction patterns for Chase
         transaction_patterns = [
             # Pattern 1: MM/DD/YYYY Description Amount
             r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([\d,]+\.?\d*)',
@@ -167,6 +175,10 @@ class UniversalPDFParser:
             r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+)',
             # Pattern 6: Month DD Description Amount (without spaces)
             r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+?)([\d,]+\.?\d*)',
+            # Pattern 7: YYYY-MM-DD Description (new format)
+            r'(\d{4}-\d{1,2}-\d{1,2})\s+(.+)',
+            # Pattern 8: Description YYYY-MM-DD (reversed)
+            r'(.+?)\s+(\d{4}-\d{1,2}-\d{1,2})',
         ]
         
         for pattern in transaction_patterns:
@@ -228,6 +240,36 @@ class UniversalPDFParser:
                         'description': description.strip(),
                         'amount': self._parse_amount(amount),
                         'amount_raw': amount,
+                        'section': section,
+                        'line_number': line_num,
+                        'full_text': line
+                    }
+                
+                elif len(groups) == 2 and pattern == transaction_patterns[6]:  # YYYY-MM-DD Description
+                    date, description = groups
+                    # Try to find amount in description
+                    amount = self._extract_amount_from_text(description)
+                    
+                    return {
+                        'date': self._format_date(date),
+                        'description': description.strip(),
+                        'amount': amount,
+                        'amount_raw': str(amount),
+                        'section': section,
+                        'line_number': line_num,
+                        'full_text': line
+                    }
+                
+                elif len(groups) == 2 and pattern == transaction_patterns[7]:  # Description YYYY-MM-DD
+                    description, date = groups
+                    # Try to find amount in description
+                    amount = self._extract_amount_from_text(description)
+                    
+                    return {
+                        'date': self._format_date(date),
+                        'description': description.strip(),
+                        'amount': amount,
+                        'amount_raw': str(amount),
                         'section': section,
                         'line_number': line_num,
                         'full_text': line
@@ -294,19 +336,22 @@ class UniversalPDFParser:
         return f"{current_year}-{month_num}-{day_num}"
 
     def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Fallback extraction when no pattern matches - improved amount extraction"""
-        # Try to find any date and amount
+        """Fallback extraction when no pattern matches - enhanced for Chase"""
+        # Try to find any date and amount - enhanced date detection
         date_match = re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)
         month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})', line, re.IGNORECASE)
+        yyyy_mm_dd_match = re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)
         amount_match = re.search(r'[\d,]+\.?\d*', line)
         
         # If we have any date-like pattern and some text, create a transaction
-        if (date_match or month_match) and len(line.split()) >= 2:
+        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 2:
             if date_match:
                 date = date_match.group()
             elif month_match:
                 month, day = month_match.groups()
                 date = self._convert_month_day_to_date(month, day)
+            elif yyyy_mm_dd_match:
+                date = yyyy_mm_dd_match.group()
             else:
                 date = ''
             
@@ -317,6 +362,10 @@ class UniversalPDFParser:
             description = line
             if date_match:
                 description = description.replace(date_match.group(), '')
+            elif month_match:
+                description = description.replace(month_match.group(), '')
+            elif yyyy_mm_dd_match:
+                description = description.replace(yyyy_mm_dd_match.group(), '')
             if amount_match:
                 description = description.replace(amount_match.group(), '')
             description = re.sub(r'\s+', ' ', description.strip())  # Clean up extra spaces
