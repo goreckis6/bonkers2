@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bonkers"
+version = "1.0.0"
+description = "Enhanced PDF Expense Parser with Bank Statements Support"
+dependencies = [
+    "PyPDF2==3.0.1",
+    "pandas==1.5.3",
+    "openpyxl==3.1.2",
+    "regex==2023.8.8",
+    "numpy==1.24.3",
+    "python-dateutil==2.8.2",
+    "flask==2.3.2",
+    "flask-cors==4.0.0",
+    "xlsxwriter==3.1.2",
+    "python-dotenv==1.0.0",
+    "gunicorn==20.1.0"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=6.0"]
+
+[tool.setuptools]
+packages = ["."]
