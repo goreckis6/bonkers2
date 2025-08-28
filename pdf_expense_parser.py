@@ -110,12 +110,13 @@ class UniversalPDFParser:
         return structured_data
 
     def _is_non_transaction_line(self, line: str) -> bool:
-        """Check if line should be skipped (headers, footers, etc.) - less restrictive"""
+        """Check if line should be skipped - enhanced filtering for Chase statements"""
         line_upper = line.upper()
         
-        # Only skip very obvious non-transaction lines
+        # Skip these types of lines - comprehensive filtering
         skip_patterns = [
-            r'^PAGE\s+\d+$',  # Just page numbers
+            # Page and document info
+            r'^PAGE\s+\d+$',  # Page numbers
             r'^ACCOUNT\s+SUMMARY$',  # Account summary headers
             r'^BALANCE\s+FORWARD$',  # Balance forward
             r'^ENDING\s+BALANCE$',   # Ending balance
@@ -124,6 +125,36 @@ class UniversalPDFParser:
             r'^STATEMENT\s+PERIOD\s*$', # Statement period
             r'^FROM\s+\d{1,2}/\d{1,2}/\d{4}\s*$',  # Just date ranges
             r'^TO\s+\d{1,2}/\d{1,2}/\d{4}\s*$',    # Just date ranges
+            
+            # Address and contact info
+            r'^P\s+O\s+BOX\s+\d+',  # P O Box addresses
+            r'^\d+\s+[A-Z\s]+\s+[A-Z\s]+\s+[A-Z]{2}\s+\d{5}',  # Street addresses
+            r'^[A-Z\s]+\,\s+[A-Z]{2}\s+\d{5}',  # City, State ZIP
+            r'^1-\d{3}-\d{3}-\d{4}',  # Phone numbers
+            r'^DEAL\s+AND\s+HARD\s+OF\s+HEARING',  # Accessibility info
+            r'^PARA\s+ESPANOL',  # Spanish info
+            r'^INTERNATIONAL\s+CALLS',  # International calls
+            
+            # Account and routing info
+            r'^\d{9,12}',  # Long account numbers
+            r'^[A-Z]{2}\s+\d{3}\s+\d{3}',  # Routing numbers
+            r'^NNNNNNNNNNN',  # Placeholder numbers
+            r'^T\s+\d+\s+\d+',  # Transaction codes
+            
+            # Terms and conditions
+            r'^CONGRATULATIONS',  # Congratulations messages
+            r'^THANKS\s+TO\s+YOUR',  # Thank you messages
+            r'^WE\s+WAIVED',  # Fee waiver messages
+            r'^MONTHLY\s+SERVICE\s+FEE',  # Fee information
+            r'^BASED\s+ON\s+AGGREGATED',  # Terms
+            r'^BUSINESS\s+COMPLETE\s+CHECKING',  # Account types
+            r'^CUTOFF\s+TIME',  # Cutoff information
+            r'^MINIMUM\s+DAILY\s+BALANCE',  # Balance requirements
+            r'^EASTERN\s+TIME',  # Time zone info
+            
+            # Empty or very short lines
+            r'^\s*$',  # Empty lines
+            r'^[A-Z\s]{1,3}$',  # Very short all caps
         ]
         
         for pattern in skip_patterns:
@@ -133,30 +164,34 @@ class UniversalPDFParser:
         return False
 
     def _looks_like_transaction(self, line: str) -> bool:
-        """Check if line looks like a transaction - enhanced for Chase statements"""
-        # More permissive: just needs some text and either date or amount
-        has_text = len(line.split()) >= 2  # At least 2 words
+        """Check if line looks like a transaction - strict filtering for Chase"""
+        # Must have sufficient text for a real transaction
+        has_text = len(line.split()) >= 4  # At least 4 words for real transactions
         
-        # Check for various date formats - enhanced
-        has_date = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)) or \
-                   bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE)) or \
-                   bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line))  # YYYY-MM-DD format
+        # Must have a valid date format
+        has_valid_date = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)) or \
+                        bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)) or \
+                        bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
         
-        # Check for amounts
-        has_amount = bool(re.search(r'[\d,]+\.?\d*', line))
-        
-        # Check for currency symbols
-        has_currency = any(symbol in line for symbol in self.currency_symbols)
-        
-        # Check for Chase transaction keywords
-        chase_keywords = [
-            'ATM', 'Check', 'Electronic', 'Debit', 'Purchase', 'VISA', 'Transfer', 
-            'ACH', 'Deposit', 'Credit', 'Debit', 'Withdrawal', 'Online', 'PMT'
+        # Must have Chase transaction keywords
+        chase_transaction_keywords = [
+            'Direct Deposit', 'ATM', 'Cash', 'Deposit', 'Withdraw', 'Card Purchase', 
+            'Payment Sent', 'Square Inc', 'Recurring', 'With Pin', 'CA Card', 'Confirmation',
+            'Check Deposit', 'Electronic Deposit', 'ACH', 'Credit', 'Debit', 'Purchase',
+            'Transfer', 'Online', 'PMT', 'Merchant', 'Service'
         ]
-        has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_keywords)
+        has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_transaction_keywords)
         
-        # Line is a transaction if it has text AND (date OR amount OR currency OR Chase keywords)
-        return has_text and (has_date or has_amount or has_currency or has_chase_keywords)
+        # Must NOT contain garbage indicators
+        garbage_indicators = [
+            'P O Box', 'Columbus OH', 'Deal and Hard', 'Para Espanol', 'International Calls',
+            'Congratulations', 'thanks to your', 'waived', 'monthly service fee', 'cutoff time',
+            'Eastern Time', 'Minimum Daily Balance', 'Business Complete', 'aggregated spending'
+        ]
+        has_garbage = any(indicator.lower() in line.lower() for indicator in garbage_indicators)
+        
+        # Line is a transaction if it has text AND valid date AND Chase keywords AND NO garbage
+        return has_text and has_valid_date and has_chase_keywords and not has_garbage
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse transaction data - enhanced for Chase statements"""
@@ -336,7 +371,11 @@ class UniversalPDFParser:
         return f"{current_year}-{month_num}-{day_num}"
 
     def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Fallback extraction when no pattern matches - enhanced for Chase"""
+        """Fallback extraction when no pattern matches - strict filtering"""
+        # Only process lines that look like real transactions
+        if not self._looks_like_transaction(line):
+            return None
+            
         # Try to find any date and amount - enhanced date detection
         date_match = re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)
         month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})', line, re.IGNORECASE)
@@ -344,7 +383,7 @@ class UniversalPDFParser:
         amount_match = re.search(r'[\d,]+\.?\d*', line)
         
         # If we have any date-like pattern and some text, create a transaction
-        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 2:
+        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 4:
             if date_match:
                 date = date_match.group()
             elif month_match:
@@ -373,21 +412,6 @@ class UniversalPDFParser:
             return {
                 'date': self._format_date(date),
                 'description': description if description else 'Transaction',
-                'amount': amount,
-                'amount_raw': str(amount),
-                'section': section,
-                'line_number': line_num,
-                'full_text': line
-            }
-        
-        # If still no match, create a basic entry for any line with text
-        if len(line.split()) >= 2:
-            # Try to extract any amount from the line
-            amount = self._extract_amount_from_text(line)
-            
-            return {
-                'date': '',
-                'description': line,
                 'amount': amount,
                 'amount_raw': str(amount),
                 'section': section,
