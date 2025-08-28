@@ -6,7 +6,7 @@ services:
     startCommand: gunicorn app:app
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10.15
+        value: 3.11.9
       - key: PIP_VERSION
         value: 23.0.1
     autoDeploy: true
