@@ -16,10 +16,14 @@ class UniversalPDFParser:
         ]
         
         self.date_patterns = [
-            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY
-            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD
-            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',  # DD MMM YYYY
+            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY or MM-DD-YYYY
+            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD or YYYY-MM-DD
+            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',  # DD Mon YYYY
+            r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:,\s*\d{4})?',  # Mon DD[, YYYY]
+            r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*\d{4})?',  # Month DD[, YYYY]
+            r'\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)(?:\s*,?\s*\d{4})?',  # DD Month [YYYY]
             r'\b\d{1,2}/\d{1,2}\b',  # MM/DD without year
+            r'\b\d{1,2}-\d{1,2}\b',  # MM-DD without year
         ]
         
         self.email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
@@ -215,7 +219,39 @@ class UniversalPDFParser:
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse transaction data - enhanced for Chase statements"""
-        
+
+        # Prefer generic approach: first date on the line + last amount on the line, keep full middle as description
+        date_match = None
+        date_patterns_generic = [
+            r'\d{4}-\d{1,2}-\d{1,2}',            # YYYY-MM-DD
+            r'\d{1,2}/\d{1,2}/\d{4}',            # MM/DD/YYYY
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}',  # Mon DD
+            r'\b\d{1,2}/\d{1,2}\b',             # MM/DD
+        ]
+        for pat in date_patterns_generic:
+            m = re.search(pat, line, re.IGNORECASE)
+            if m:
+                date_match = m
+                break
+        last_amount_str = self._find_last_amount_string(line)
+        if date_match and last_amount_str:
+            raw_date = date_match.group(0)
+            parsed_date = self._format_date(raw_date)
+            description = line[:date_match.start()] + line[date_match.end():]
+            idx = description.rfind(last_amount_str)
+            if idx != -1:
+                description = description[:idx] + description[idx + len(last_amount_str):]
+            description = re.sub(r'\s+', ' ', description).strip()
+            return {
+                'date': parsed_date,
+                'description': description,
+                'amount': self._parse_amount(last_amount_str),
+                'amount_raw': last_amount_str,
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+
         # Enhanced transaction patterns for Chase
         transaction_patterns = [
             # 0: MM/DD/YYYY Description Amount
@@ -356,23 +392,18 @@ class UniversalPDFParser:
         return self._extract_fallback_transaction(line, section, line_num)
 
     def _extract_amount_from_text(self, text: str) -> float:
-        """Extract amount from text - improved extraction"""
-        # Look for amounts with various patterns
-        amount_patterns = [
-            r'[\d,]+\.?\d*',  # 9549 or 9549.00
-            r'\$[\d,]+\.?\d*',  # $9549.00
-            r'[\d,]+\.\d{2}',  # 9549.00
-        ]
-        
-        for pattern in amount_patterns:
-            matches = re.findall(pattern, text)
-            if matches:
-                # Try to find the largest number (likely the transaction amount)
-                amounts = [self._parse_amount(match) for match in matches]
-                if amounts:
-                    return max(amounts)
-        
-        return 0.0
+        """Extract amount from text - prefer the LAST currency-like number on the line."""
+        # Match currency-like numbers including optional $ and parentheses for negatives
+        matches = re.findall(r'(\(?-?\$?[\d,]+(?:\.\d{2})?\)?)', text)
+        if not matches:
+            return 0.0
+        last = matches[-1]
+        return self._parse_amount(last)
+
+    def _find_last_amount_string(self, text: str) -> str:
+        """Return the last currency-like number substring from text."""
+        matches = re.findall(r'(\(?-?\$?[\d,]+(?:\.\d{2})?\)?)', text)
+        return matches[-1] if matches else ''
 
     def _format_date(self, date_str: str) -> str:
         """Format date to YYYY-MM-DD format"""
@@ -382,14 +413,33 @@ class UniversalPDFParser:
                 month, day, year = date_str.split('/')
                 return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
             
+            # Handle MM/DD without year -> assume current year
+            if re.match(r'^\d{1,2}/\d{1,2}$', date_str):
+                month, day = date_str.split('/')
+                year = str(pd.Timestamp.now().year)
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+            # Handle MM-DD-YYYY
+            if re.match(r'^\d{1,2}-\d{1,2}-\d{4}$', date_str):
+                month, day, year = date_str.split('-')
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+            # Handle MM-DD without year -> assume current year
+            if re.match(r'^\d{1,2}-\d{1,2}$', date_str):
+                month, day = date_str.split('-')
+                year = str(pd.Timestamp.now().year)
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            
             # Handle YYYY-MM-DD format (already correct)
             elif re.match(r'\d{4}-\d{1,2}-\d{1,2}', date_str):
                 return date_str
             
             # Handle other formats - try to parse
             else:
+                # Normalize month names (short/full) and remove commas
+                normalized = re.sub(r',', '', date_str).strip()
                 # Try pandas to_datetime for various formats
-                parsed_date = pd.to_datetime(date_str, errors='coerce')
+                parsed_date = pd.to_datetime(normalized, errors='coerce')
                 if pd.notna(parsed_date):
                     return parsed_date.strftime('%Y-%m-%d')
                 
@@ -606,9 +656,19 @@ class UniversalPDFParser:
     def _parse_amount(self, amount_str: str) -> float:
         """Parse amount string to float"""
         try:
-            # Remove currency symbols and commas
-            cleaned = re.sub(r'[^\d.-]', '', amount_str)
-            return float(cleaned) if cleaned else 0.0
+            s = amount_str.strip()
+            # Parentheses mean negative
+            is_negative = s.startswith('(') and s.endswith(')')
+            # Remove everything except digits, comma, dot, minus
+            cleaned = re.sub(r'[^\d.,-]', '', s)
+            # Remove thousands separators
+            cleaned = cleaned.replace(',', '')
+            if cleaned.count('-') > 1:
+                cleaned = cleaned.replace('-', '', cleaned.count('-') - 1)
+            value = float(cleaned) if cleaned else 0.0
+            if is_negative and value > 0:
+                value = -value
+            return value
         except:
             return 0.0
 
