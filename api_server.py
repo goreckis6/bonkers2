@@ -299,7 +299,7 @@ def export_pdf_data_excel_endpoint():
                 # Data types sheet
                 data_types = []
                 for col in df.columns:
-                    non_empty = df[col].astype_str().str.strip().ne('').sum()
+                    non_empty = df[col].astype(str).str.strip().ne('').sum()
                     data_types.append([col, non_empty, len(df) - non_empty])
                 
                 types_df = pd.DataFrame(data_types, columns=['Column', 'Non-Empty', 'Empty'])
