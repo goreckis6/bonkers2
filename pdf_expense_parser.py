@@ -164,16 +164,16 @@ class UniversalPDFParser:
         return False
 
     def _looks_like_transaction(self, line: str) -> bool:
-        """Check if line looks like a transaction - strict filtering for Chase"""
+        """Check if line looks like a transaction - balanced filtering for Chase"""
         # Must have sufficient text for a real transaction
-        has_text = len(line.split()) >= 4  # At least 4 words for real transactions
+        has_text = len(line.split()) >= 3  # At least 3 words (reduced from 4)
         
         # Must have a valid date format
         has_valid_date = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)) or \
                         bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)) or \
                         bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
         
-        # Must have Chase transaction keywords
+        # Must have Chase transaction keywords OR look like a transaction pattern
         chase_transaction_keywords = [
             'Direct Deposit', 'ATM', 'Cash', 'Deposit', 'Withdraw', 'Card Purchase', 
             'Payment Sent', 'Square Inc', 'Recurring', 'With Pin', 'CA Card', 'Confirmation',
@@ -182,16 +182,21 @@ class UniversalPDFParser:
         ]
         has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_transaction_keywords)
         
-        # Must NOT contain garbage indicators
-        garbage_indicators = [
+        # Check for transaction patterns (date + text structure)
+        has_transaction_pattern = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}\s+[A-Z]', line)) or \
+                                 bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}\s+[A-Z]', line)) or \
+                                 bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+[A-Z]', line, re.IGNORECASE))
+        
+        # Must NOT contain obvious garbage indicators
+        obvious_garbage_indicators = [
             'P O Box', 'Columbus OH', 'Deal and Hard', 'Para Espanol', 'International Calls',
             'Congratulations', 'thanks to your', 'waived', 'monthly service fee', 'cutoff time',
             'Eastern Time', 'Minimum Daily Balance', 'Business Complete', 'aggregated spending'
         ]
-        has_garbage = any(indicator.lower() in line.lower() for indicator in garbage_indicators)
+        has_obvious_garbage = any(indicator.lower() in line.lower() for indicator in obvious_garbage_indicators)
         
-        # Line is a transaction if it has text AND valid date AND Chase keywords AND NO garbage
-        return has_text and has_valid_date and has_chase_keywords and not has_garbage
+        # Line is a transaction if it has text AND (valid date OR Chase keywords OR transaction pattern) AND NO obvious garbage
+        return has_text and (has_valid_date or has_chase_keywords or has_transaction_pattern) and not has_obvious_garbage
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse transaction data - enhanced for Chase statements"""
@@ -371,7 +376,7 @@ class UniversalPDFParser:
         return f"{current_year}-{month_num}-{day_num}"
 
     def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Fallback extraction when no pattern matches - strict filtering"""
+        """Fallback extraction when no pattern matches - balanced filtering"""
         # Only process lines that look like real transactions
         if not self._looks_like_transaction(line):
             return None
@@ -383,7 +388,7 @@ class UniversalPDFParser:
         amount_match = re.search(r'[\d,]+\.?\d*', line)
         
         # If we have any date-like pattern and some text, create a transaction
-        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 4:
+        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 3:
             if date_match:
                 date = date_match.group()
             elif month_match:
@@ -412,6 +417,21 @@ class UniversalPDFParser:
             return {
                 'date': self._format_date(date),
                 'description': description if description else 'Transaction',
+                'amount': amount,
+                'amount_raw': str(amount),
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        # If still no match but line looks promising, create a basic entry
+        if len(line.split()) >= 3 and not self._is_non_transaction_line(line):
+            # Try to extract any amount from the line
+            amount = self._extract_amount_from_text(line)
+            
+            return {
+                'date': '',
+                'description': line,
                 'amount': amount,
                 'amount_raw': str(amount),
                 'section': section,
