@@ -80,15 +80,18 @@ class UniversalPDFParser:
             return {'success': False, 'error': str(e)}
 
     def _extract_structured_data_enhanced(self, text: str) -> List[Dict[str, Any]]:
-        """Enhanced extraction with banking section recognition"""
+        """Enhanced extraction with banking section recognition - focused on transactions only"""
         lines = text.split('\n')
         structured_data = []
         current_section = 'general'
-        section_data = []
         
         for line_num, line in enumerate(lines):
             line = line.strip()
             if not line:
+                continue
+            
+            # Skip header lines, footers, and non-transaction content
+            if self._is_non_transaction_line(line):
                 continue
             
             # Detect banking sections
@@ -98,14 +101,144 @@ class UniversalPDFParser:
                 print(f"🔍 Detected section: {current_section}")
                 continue
             
-            # Parse line based on current section
-            parsed_line = self._parse_line_by_section(line, current_section, line_num)
-            if parsed_line:
-                parsed_line['section'] = current_section
-                parsed_line['line_number'] = line_num
-                structured_data.append(parsed_line)
+            # Only process lines that look like transactions
+            if self._looks_like_transaction(line):
+                parsed_line = self._parse_transaction_only(line, current_section, line_num)
+                if parsed_line:
+                    structured_data.append(parsed_line)
         
         return structured_data
+
+    def _is_non_transaction_line(self, line: str) -> bool:
+        """Check if line should be skipped (headers, footers, etc.)"""
+        line_upper = line.upper()
+        
+        # Skip these types of lines
+        skip_patterns = [
+            r'^PAGE\s+\d+',  # Page numbers
+            r'^ACCOUNT\s+SUMMARY',  # Account summary headers
+            r'^BALANCE\s+FORWARD',  # Balance forward
+            r'^ENDING\s+BALANCE',   # Ending balance
+            r'^TOTAL\s+',           # Total lines
+            r'^[A-Z\s]+BANK',       # Bank name headers
+            r'^STATEMENT\s+PERIOD', # Statement period
+            r'^FROM\s+\d{1,2}/\d{1,2}/\d{4}',  # Date ranges
+            r'^TO\s+\d{1,2}/\d{1,2}/\d{4}',    # Date ranges
+            r'^[A-Z\s]+CREDIT\s+UNION',  # Credit union names
+            r'^\d{1,2}/\d{1,2}/\d{4}\s*$',  # Just a date
+            r'^[A-Z\s]+$',  # All caps text (likely headers)
+        ]
+        
+        for pattern in skip_patterns:
+            if re.search(pattern, line_upper, re.IGNORECASE):
+                return True
+        
+        return False
+
+    def _looks_like_transaction(self, line: str) -> bool:
+        """Check if line looks like a transaction (has date and amount)"""
+        # Must have at least a date and some text that could be description
+        has_date = bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line))
+        has_text = len(line.split()) >= 3  # At least 3 words
+        
+        # Or must have month abbreviation and amount
+        has_month = bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line, re.IGNORECASE))
+        has_amount = bool(re.search(r'[\d,]+\.?\d*', line))
+        
+        return (has_date and has_text) or (has_month and has_amount)
+
+    def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
+        """Parse only transaction data - clean and simple"""
+        
+        # Try different transaction patterns
+        transaction_patterns = [
+            # Pattern 1: MM/DD/YYYY Description Amount
+            r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([\d,]+\.?\d*)',
+            # Pattern 2: Month DD Description Amount (Feb 17 ATM Cash Deposit... 9549.00)
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+?)\s+([\d,]+\.?\d*)',
+            # Pattern 3: Description Date Amount
+            r'(.+?)\s+(\d{1,2}/\d{1,2}/\d{4})\s+([\d,]+\.?\d*)',
+            # Pattern 4: Date Description Ref Amount
+            r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([A-Z0-9]+)\s+([\d,]+\.?\d*)',
+        ]
+        
+        for pattern in transaction_patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if match:
+                groups = match.groups()
+                
+                if len(groups) == 3:  # Date Description Amount
+                    if pattern == transaction_patterns[1]:  # Month DD Description Amount
+                        month, day, description, amount = groups[0], groups[1], groups[2], groups[3]
+                        # Convert month abbreviation to date
+                        date = self._convert_month_day_to_date(month, day)
+                    else:
+                        date, description, amount = groups
+                    
+                    return {
+                        'date': date.strip(),
+                        'description': description.strip(),
+                        'amount': self._parse_amount(amount),
+                        'amount_raw': amount,
+                        'section': section,
+                        'line_number': line_num,
+                        'full_text': line
+                    }
+                
+                elif len(groups) == 4:  # Date Description Ref Amount
+                    date, description, ref, amount = groups
+                    return {
+                        'date': date.strip(),
+                        'description': f"{description.strip()} (Ref: {ref.strip()})",
+                        'amount': self._parse_amount(amount),
+                        'amount_raw': amount,
+                        'section': section,
+                        'line_number': line_num,
+                        'full_text': line
+                    }
+        
+        # If no pattern matches, try to extract what we can
+        return self._extract_fallback_transaction(line, section, line_num)
+
+    def _convert_month_day_to_date(self, month: str, day: str) -> str:
+        """Convert month abbreviation and day to full date"""
+        month_map = {
+            'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
+            'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
+            'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
+        }
+        
+        current_year = pd.Timestamp.now().year
+        month_num = month_map.get(month, '01')
+        day_num = day.zfill(2)
+        
+        return f"{month_num}/{day_num}/{current_year}"
+
+    def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
+        """Fallback extraction when no pattern matches"""
+        # Try to find any date and amount
+        date_match = re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)
+        amount_match = re.search(r'[\d,]+\.?\d*', line)
+        
+        if date_match and amount_match:
+            date = date_match.group()
+            amount = amount_match.group()
+            
+            # Remove date and amount from line to get description
+            description = line.replace(date, '').replace(amount, '').strip()
+            description = re.sub(r'\s+', ' ', description)  # Clean up extra spaces
+            
+            return {
+                'date': date,
+                'description': description if description else 'Transaction',
+                'amount': self._parse_amount(amount),
+                'amount_raw': amount,
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        return None
 
     def _detect_banking_section(self, line: str) -> Optional[str]:
         """Detect banking document sections"""
