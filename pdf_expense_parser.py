@@ -28,14 +28,6 @@ class ExpenseParser:
             # Wyciągi bankowe - różne formaty
             r'(?:debit|credit|amount|kwota):?\s*[-+]?(\d+[.,]\d{2})',
             r'[-+]?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})',  # Duże kwoty z separatorami tysięcy
-            
-            # Dodatkowe wzorce dla wyciągów bankowych z spacjami
-            r'[-+]?(\d+\s+\d{2})\s*(?:usd|eur|pln|gbp)?',  # "132 47" -> "132.47"
-            r'[-+]?(\d+\.\d{2})\s*(?:usd|eur|pln|gbp)?',  # "132.47" -> "132.47"
-            
-            # Chase-specific patterns
-            r'[-+]?\$?(\d+\.\d{2})',  # $132.47 or 132.47
-            r'[-+]?(\d+\.\d{2})\s*\$?',  # 132.47$ or 132.47
         ]
         
         self.date_patterns = [
@@ -80,17 +72,11 @@ class ExpenseParser:
         
         # Enhanced patterns specifically for Chase Bank
         self.chase_patterns = {
-            'transaction_line': r'(\d{2}/\d{2})\s+(.+?)\s+([-+]?\$?\d+\.\d{2})',
-            'date_amount': r'(\d{2}/\d{2})\s+.*?([-+]?\$?\d+\.\d{2})',
-            'description': r'\d{2}/\d{2}\s+(.+?)\s+[-+]?\$?\d+\.\d{2}',
-            # More flexible patterns for different Chase formats
-            'flexible_transaction': r'(\d{1,2}/\d{1,2})\s+(.+?)\s+([-+]?\$?\d+\.\d{2})',
-            'amount_only': r'([-+]?\$?\d+\.\d{2})',
-            'date_only': r'(\d{1,2}/\d{1,2})',
-            # Very flexible patterns for different Chase layouts
-            'any_date_amount': r'(\d{1,2}[/-]\d{1,2})\s+(.+?)\s+([-+]?\$?\d+\.\d{2})',
-            'amount_with_description': r'([-+]?\$?\d+\.\d{2})\s+(.+)',
-            'description_with_amount': r'(.+?)\s+([-+]?\$?\d+\.\d{2})',
+            'transaction_line': r'(\d{1,2}/\d{1,2})\s+(.+?)\s+([-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2})',
+            'date_amount': r'(\d{1,2}/\d{1,2})\s+.*?([-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2})',
+            'description': r'\d{1,2}/\d{1,2}\s+(.+?)\s+[-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2}',
+            'simple_transaction': r'(\d{1,2}/\d{1,2})\s+(.+)',
+            'amount_only': r'[-+]?\$?(\d{1,3}(?:,\d{3})*\.\d{2})',
         }
 
         # Waluty międzynarodowe
@@ -144,12 +130,7 @@ class ExpenseParser:
                 amount_str = matches[-1]
                 # Usuń symbole walut z kwoty
                 amount_str = re.sub(r'[€$£¥₹]', '', amount_str).strip()
-                
-                # Normalizuj separatory dziesiętne - zamień przecinki na kropki
                 amount_str = amount_str.replace(',', '.')
-                
-                # Usuń spacje w środku liczby (np. "132 47" -> "132.47")
-                amount_str = re.sub(r'(\d+)\s+(\d+)', r'\1.\2', amount_str)
                 
                 try:
                     amount = float(amount_str)
@@ -193,7 +174,8 @@ class ExpenseParser:
         
         bank_keywords = ['bank statement', 'wyciąg bankowy', 'kontoauszug', 'relevé bancaire', 
                         'account statement', 'transaction history', 'historia transakcji',
-                        'chase', 'jpmorgan', 'checking account', 'savings account']
+                        'chase', 'jpmorgan', 'checking account', 'savings account', 'statement period',
+                        'beginning balance', 'ending balance', 'deposits', 'withdrawals', 'checks']
         invoice_keywords = ['faktura', 'invoice', 'rechnung', 'facture', 'bill']
         receipt_keywords = ['paragon', 'receipt', 'quittung', 'reçu', 'ricevuta']
         
@@ -256,86 +238,115 @@ class ExpenseParser:
         lines = text.split('\n')
         
         print(f"🏦 Parsing Chase bank statement with {len(lines)} lines")
-        print(f"🏦 First 5 lines for debugging:")
-        for i, line in enumerate(lines[:5]):
-            print(f"  Line {i}: '{line}'")
+        print(f"📄 First 10 lines preview:")
+        for i, line in enumerate(lines[:10]):
+            print(f"  {i+1}: {line.strip()}")
         
         for line_num, line in enumerate(lines):
             line = line.strip()
             if not line:
                 continue
             
-            # Debug: Show lines that might contain transactions
-            if re.search(r'\d+\.\d{2}', line) or re.search(r'\d{1,2}[/-]\d{1,2}', line):
-                print(f"🔍 Potential transaction line {line_num}: '{line}'")
-                
-            # Try multiple Chase patterns for better compatibility
-            chase_match = None
-            pattern_used = None
+            print(f"🔍 Checking line {line_num}: {line}")
             
-            # Try different patterns in order of preference
-            for pattern_name, pattern in self.chase_patterns.items():
-                if pattern_name in ['transaction_line', 'any_date_amount', 'flexible_transaction']:
-                    chase_match = re.search(pattern, line)
-                    if chase_match:
-                        pattern_used = pattern_name
-                        break
+            # Try multiple patterns for Chase transactions
+            transaction = None
             
+            # Pattern 1: Full transaction line with date, description, and amount
+            chase_match = re.search(self.chase_patterns['transaction_line'], line)
             if chase_match:
-                if len(chase_match.groups()) == 3:
-                    date_str, description, amount_str = chase_match.groups()
-                elif len(chase_match.groups()) == 2:
-                    # Handle patterns with only 2 groups
-                    if 'amount_with_description' in pattern_used:
-                        amount_str, description = chase_match.groups()
-                        date_str = None
-                    elif 'description_with_amount' in pattern_used:
-                        description, amount_str = chase_match.groups()
-                        date_str = None
-                    else:
-                        continue
-                else:
-                    continue
-                
-                # Parse amount
-                amount_str = amount_str.replace('$', '').replace(',', '')
-                try:
-                    amount = abs(float(amount_str))  # Always positive for expenses
-                except ValueError:
-                    continue
-                
-                # Parse date (MM/DD format, assume current year)
-                date_formatted = datetime.now().strftime('%Y-%m-%d')  # Default to today
-                if date_str:
-                    try:
-                        # Handle different date separators
-                        date_str = date_str.replace('-', '/')
-                        current_year = datetime.now().year
-                        full_date = f"{date_str}/{current_year}"
-                        parsed_date = datetime.strptime(full_date, '%m/%d/%Y')
-                        date_formatted = parsed_date.strftime('%Y-%m-%d')
-                    except ValueError:
-                        pass  # Keep default date
-                
-                # Clean description
-                description = description.strip()
-                if len(description) < 3:
-                    description = "Chase Transaction"
-                
-                transaction = {
-                    'date': date_formatted,
-                    'amount': amount,
-                    'description': description,
-                    'currency': 'USD',
-                    'type': 'chase_transaction',
-                    'category': self.categorize_expense_advanced(description, amount, 'bank_statement')
-                }
-                
+                print(f"✓ Pattern 1 matched: {chase_match.groups()}")
+                transaction = self._parse_chase_transaction_from_match(chase_match)
+            
+            # Pattern 2: Simple date and description, look for amount in same or next line
+            if not transaction:
+                simple_match = re.search(self.chase_patterns['simple_transaction'], line)
+                if simple_match:
+                    print(f"✓ Pattern 2 matched: {simple_match.groups()}")
+                    # Look for amount in the same line or next lines
+                    amount_match = re.search(self.chase_patterns['amount_only'], line)
+                    if not amount_match and line_num + 1 < len(lines):
+                        amount_match = re.search(self.chase_patterns['amount_only'], lines[line_num + 1])
+                    
+                    if amount_match:
+                        date_str, description = simple_match.groups()
+                        amount_str = amount_match.group(1) if amount_match.group(1) else amount_match.group(0)
+                        transaction = self._create_chase_transaction(date_str, description, amount_str)
+            
+            # Pattern 3: Look for any line with date pattern
+            if not transaction:
+                date_match = re.search(r'(\d{1,2}/\d{1,2})', line)
+                if date_match:
+                    print(f"✓ Date found: {date_match.group(1)}")
+                    # Extract everything after date as description
+                    parts = line.split(date_match.group(1), 1)
+                    if len(parts) > 1:
+                        rest = parts[1].strip()
+                        # Look for amount in the rest
+                        amount_match = re.search(self.chase_patterns['amount_only'], rest)
+                        if amount_match:
+                            description = re.sub(self.chase_patterns['amount_only'], '', rest).strip()
+                            amount_str = amount_match.group(1) if amount_match.group(1) else amount_match.group(0)
+                            transaction = self._create_chase_transaction(date_match.group(1), description, amount_str)
+            
+            if transaction:
                 transactions.append(transaction)
-                print(f"✓ Found Chase transaction ({pattern_used}): {date_formatted} - {description} - ${amount}")
+                print(f"✅ Added transaction: {transaction}")
         
-        print(f"🏦 Chase parsing complete: {len(transactions)} transactions found")
-        return transactions
+                 print(f"🏦 Chase parsing complete: {len(transactions)} transactions found")
+         return transactions
+     
+     def _parse_chase_transaction_from_match(self, match) -> Optional[Dict]:
+         """Parse Chase transaction from regex match"""
+         try:
+             if len(match.groups()) == 3:
+                 date_str, description, amount_str = match.groups()
+                 return self._create_chase_transaction(date_str, description, amount_str)
+             return None
+         except Exception as e:
+             print(f"❌ Error parsing Chase match: {e}")
+             return None
+     
+     def _create_chase_transaction(self, date_str: str, description: str, amount_str: str) -> Optional[Dict]:
+         """Create Chase transaction dictionary"""
+         try:
+             # Parse amount
+             amount_str = amount_str.replace('$', '').replace(',', '')
+             amount = abs(float(amount_str))
+             
+             # Parse date (MM/DD format, assume current year)
+             date_formatted = datetime.now().strftime('%Y-%m-%d')  # Default to today
+             if date_str:
+                 try:
+                     # Handle different date separators
+                     date_str = date_str.replace('-', '/')
+                     current_year = datetime.now().year
+                     full_date = f"{date_str}/{current_year}"
+                     parsed_date = datetime.strptime(full_date, '%m/%d/%Y')
+                     date_formatted = parsed_date.strftime('%Y-%m-%d')
+                 except ValueError:
+                     pass  # Keep default date
+             
+             # Clean description
+             description = description.strip()
+             if len(description) < 3:
+                 description = "Chase Transaction"
+             
+             transaction = {
+                 'date': date_formatted,
+                 'amount': amount,
+                 'description': description,
+                 'currency': 'USD',
+                 'type': 'chase_transaction',
+                 'category': self.categorize_expense_advanced(description, amount, 'bank_statement')
+             }
+             
+             print(f"✅ Created Chase transaction: {date_formatted} - {description} - ${amount}")
+             return transaction
+             
+         except Exception as e:
+             print(f"❌ Error creating Chase transaction: {e}")
+             return None
 
     def categorize_expense_advanced(self, description: str, amount: float, doc_type: str) -> str:
         """Zaawansowana kategoryzacja z uwzględnieniem typu dokumentu i kwoty"""
@@ -403,14 +414,18 @@ class ExpenseParser:
             # Wykryj typ dokumentu
             doc_type = self.detect_document_type(text)
             
+            print(f"📄 Document type detected: {doc_type}")
+            print(f"📄 Text preview (first 500 chars): {text[:500]}")
+            
             if doc_type == 'bank_statement':
                 # Parsuj wyciąg bankowy
                 transactions = self.parse_bank_statement(text)
+                print(f"🏦 Found {len(transactions)} transactions")
                 return {
                     'transactions': transactions,
                     'document_type': doc_type,
                     'fileName': pdf_path.split('/')[-1],
-                    'success': True
+                    'success': len(transactions) > 0
                 }
             else:
                 # Parsuj standardowy dokument (faktura/paragon)
@@ -419,6 +434,8 @@ class ExpenseParser:
                 vendor = self.extract_vendor(text)
                 description = self.generate_description(text, vendor)
                 category = self.categorize_expense_advanced(description, amount or 0, doc_type)
+                
+                print(f"📄 Parsed single document: amount={amount}, date={date}, vendor={vendor}")
                 
                 return {
                     'description': description,
@@ -429,7 +446,7 @@ class ExpenseParser:
                     'vendor': vendor,
                     'document_type': doc_type,
                     'fileName': pdf_path.split('/')[-1],
-                    'success': True
+                    'success': amount is not None and amount > 0
                 }
                 
         except Exception as e:
