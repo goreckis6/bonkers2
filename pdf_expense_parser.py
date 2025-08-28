@@ -572,7 +572,7 @@ class UniversalPDFParser:
         return clean_df
 
     def export_to_excel(self, data: List[Dict[str, Any]], filename: str = None) -> str:
-        """Export to Excel with enhanced banking sheets"""
+        """Export to Excel with only main data sheet - no extra sheets"""
         df = self.create_dataframe(data)
         
         if df.empty:
@@ -582,14 +582,8 @@ class UniversalPDFParser:
             filename = f"enhanced_pdf_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            # Main data sheet
+            # Only main data sheet - no extra sheets
             df.to_excel(writer, sheet_name='Extracted Data', index=False)
-            
-            # Banking summary sheet
-            self._create_banking_summary_sheet(writer, df)
-            
-            # Data types sheet
-            self._create_data_types_sheet(writer, df)
         
         return filename
 
