@@ -6,7 +6,7 @@ from flask_cors import CORS
 import os
 import tempfile
 from datetime import datetime
-from pdf_expense_parser import ExpenseParser
+from pdf_expense_parser import UniversalPDFParser
 
 app = Flask(__name__)
 
@@ -26,7 +26,7 @@ CORS(
     allow_headers=["*"],
 )
 
-parser = ExpenseParser()
+parser = UniversalPDFParser()
 
 # --- Supabase (opcjonalnie) ---
 SUPABASE_ENABLED = False
@@ -61,7 +61,7 @@ def parse_pdf_endpoint():
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
             file.save(tmp_file.name)
-            result = parser.parse_pdf_file(tmp_file.name)
+            result = parser.parse_pdf_to_structured_data(tmp_file.name)
             os.unlink(tmp_file.name)
 
         if SUPABASE_ENABLED and result.get('success'):
@@ -90,11 +90,11 @@ def parse_multiple_pdfs_endpoint():
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                     f.save(tmp_file.name)
                     try:
-                        results.append(parser.parse_pdf_file(tmp_file.name))
+                        results.append(parser.parse_pdf_to_structured_data(tmp_file.name))
                     finally:
                         os.unlink(tmp_file.name)
 
-        df = parser.create_expense_dataframe(results)
+        df = parser.create_dataframe(results[0]['structured_data'] if results else [])
         summary = parser.generate_summary_report(df) if hasattr(df, "empty") and not df.empty else {}
 
         supabase_saved = False
@@ -125,7 +125,7 @@ def export_csv_endpoint():
             return jsonify({'error': 'Brak danych do eksportu'}), 400
 
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv', encoding='utf-8-sig') as tmp_file:
-            parser.export_to_csv_advanced(expenses, tmp_file.name)
+            parser.export_to_csv(expenses, tmp_file.name)
             with open(tmp_file.name, 'r', encoding='utf-8-sig') as f:
                 csv_content = f.read()
             os.unlink(tmp_file.name)
@@ -148,7 +148,7 @@ def export_excel_endpoint():
             return jsonify({'error': 'Brak danych do eksportu'}), 400
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
-            parser.export_to_excel_advanced(expenses, tmp_file.name)
+            parser.export_to_excel(expenses, tmp_file.name)
             with open(tmp_file.name, 'rb') as f:
                 excel_content = f.read()
             os.unlink(tmp_file.name)

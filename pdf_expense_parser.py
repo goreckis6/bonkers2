@@ -1,100 +1,39 @@
-# Enhanced PDF Expense Parser with Bank Statements Support
-# Funkcja do wyodrębniania danych o wydatkach z plików PDF oraz wyciągów bankowych
-# Obsługuje banki z całego świata używając pandas do analizy danych
+# Universal PDF Parser - Converts ANY PDF to Structured Data
+# Fast conversion to Excel/CSV format with columns and rows
 
 import re
-import json
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 import warnings
 warnings.filterwarnings('ignore')
 
-class ExpenseParser:
+class UniversalPDFParser:
     def __init__(self):
-        # Wzorce regex do znajdowania różnych typów danych - rozszerzone o formaty międzynarodowe
-        self.amount_patterns = [
-            # Polski format
-            r'(?:łącznie|suma|total|do zapłaty):?\s*(\d+[.,]\d{2})\s*(?:pln|zł)?',
-            r'(\d+[.,]\d{2})\s*(?:pln|zł)',
-            r'kwota:?\s*(\d+[.,]\d{2})',
-            
-            # Formaty międzynarodowe
-            r'(?:total|amount|sum):?\s*([€$£¥₹]\s*\d+[.,]\d{2})',
-            r'([€$£¥₹]\s*\d+[.,]\d{2})',
-            r'(\d+[.,]\d{2})\s*(?:eur|usd|gbp|jpy|inr)',
-            
-            # Wyciągi bankowe - różne formaty
-            r'(?:debit|credit|amount|kwota):?\s*[-+]?(\d+[.,]\d{2})',
-            r'[-+]?(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})',  # Duże kwoty z separatorami tysięcy
-        ]
-        
-        self.date_patterns = [
-            # Polski format
-            r'data\s*(?:wystawienia|sprzedaży|faktury|operacji)?:?\s*(\d{1,2}[.-]\d{1,2}[.-]\d{4})',
-            r'(\d{1,2}[.-]\d{1,2}[.-]\d{4})',
-            r'(\d{4}[.-]\d{1,2}[.-]\d{1,2})',
-            
-            # Formaty międzynarodowe
-            r'(?:date|datum|fecha|data):?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
-            r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
-            r'(\d{4}[/-]\d{1,2}[/-]\d{1,2})',
-            
-            # Format amerykański MM/DD/YYYY
-            r'(\d{1,2}/\d{1,2}/\d{4})',
-            
-            # Format ISO
-            r'(\d{4}-\d{2}-\d{2})',
-        ]
-        
-        self.vendor_patterns = [
-            # Polski
-            r'(?:sprzedawca|firma|dostawca):?\s*([^\n]+)',
-            r'nazwa\s*firmy:?\s*([^\n]+)',
-            
-            # Międzynarodowe
-            r'(?:vendor|merchant|company|payee|beneficiary):?\s*([^\n]+)',
-            r'(?:von|de|para|to):?\s*([^\n]+)',
-            
-            # Wyciągi bankowe
-            r'(?:transfer|payment|płatność)\s*(?:to|do|für):?\s*([^\n]+)',
-        ]
-
-        # Wzorce dla różnych typów transakcji bankowych
-        self.bank_transaction_patterns = {
-            'transfer': r'(?:transfer|przelew|überweisung|virement)',
-            'card_payment': r'(?:card|karta|carte|tarjeta)',
-            'atm': r'(?:atm|bankomat|geldautomat)',
-            'direct_debit': r'(?:direct debit|polecenie zapłaty|lastschrift)',
-            'standing_order': r'(?:standing order|zlecenie stałe|dauerauftrag)',
-        }
-        
-        # Enhanced patterns specifically for Chase Bank
-        self.chase_patterns = {
-            'transaction_line': r'(\d{1,2}/\d{1,2})\s+(.+?)\s+([-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2})',
-            'date_amount': r'(\d{1,2}/\d{1,2})\s+.*?([-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2})',
-            'description': r'\d{1,2}/\d{1,2}\s+(.+?)\s+[-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2}',
-            'simple_transaction': r'(\d{1,2}/\d{1,2})\s+(.+)',
-            'amount_only': r'[-+]?\$?(\d{1,3}(?:,\d{3})*\.\d{2})',
-        }
-
-        # Waluty międzynarodowe
-        self.currencies = {
-            'PLN': ['pln', 'zł', 'złoty', 'złote'],
-            'EUR': ['eur', '€', 'euro'],
-            'USD': ['usd', '$', 'dollar'],
-            'GBP': ['gbp', '£', 'pound'],
-            'JPY': ['jpy', '¥', 'yen'],
-            'CHF': ['chf', 'franc'],
-            'CAD': ['cad', 'c$'],
-            'AUD': ['aud', 'a$'],
+        """Universal PDF parser for any type of document"""
+        # Common data patterns to look for
+        self.data_patterns = {
+            'amounts': [
+                r'[-+]?\$?\d{1,3}(?:,\d{3})*\.\d{2}',  # $1,234.56 or 1234.56
+                r'[-+]?\d+\.\d{2}',  # 123.45
+                r'[-+]?\d+',  # 123
+            ],
+            'dates': [
+                r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY
+                r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD
+                r'\d{1,2}\.\d{1,2}\.\d{4}',  # MM.DD.YYYY
+            ],
+            'emails': [
+                r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            ],
+            'phones': [
+                r'\+?1?[-.\s]?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}'
+            ]
         }
 
     def extract_text_from_pdf(self, pdf_path: str) -> str:
-        """
-        Wyodrębnia tekst z pliku PDF z lepszą obsługą różnych formatów
-        """
+        """Extract text from PDF file"""
         try:
             import PyPDF2
             
@@ -106,349 +45,39 @@ class ExpenseParser:
                     if page_text:
                         text += page_text + "\n"
             
-            return text.lower()
+            return text
         except ImportError:
-            raise Exception("Biblioteka PyPDF2 nie jest zainstalowana. Użyj: pip install PyPDF2")
+            raise Exception("PyPDF2 not installed. Use: pip install PyPDF2")
         except Exception as e:
-            raise Exception(f"Błąd podczas czytania PDF: {str(e)}")
+            raise Exception(f"Error reading PDF: {str(e)}")
 
-    def detect_currency(self, text: str) -> str:
-        """Wykrywa walutę w tekście"""
-        for currency, patterns in self.currencies.items():
-            for pattern in patterns:
-                if pattern in text.lower():
-                    return currency
-        return 'PLN'  # Domyślna waluta
-
-    def extract_amount_with_currency(self, text: str) -> Tuple[Optional[float], str]:
-        """Wyodrębnia kwotę wraz z walutą"""
-        currency = self.detect_currency(text)
-        
-        for pattern in self.amount_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            if matches:
-                amount_str = matches[-1]
-                # Usuń symbole walut z kwoty
-                amount_str = re.sub(r'[€$£¥₹]', '', amount_str).strip()
-                amount_str = amount_str.replace(',', '.')
-                
-                try:
-                    amount = float(amount_str)
-                    return amount, currency
-                except ValueError:
-                    continue
-        return None, currency
-
-    def extract_date_advanced(self, text: str) -> Optional[str]:
-        """Zaawansowane wyodrębnianie dat z różnych formatów międzynarodowych"""
-        for pattern in self.date_patterns:
-            matches = re.findall(pattern, text)
-            if matches:
-                date_str = matches[0]
-                # Normalizuj separatory
-                date_str = re.sub(r'[./-]', '-', date_str)
-                
-                try:
-                    # Spróbuj różne formaty daty
-                    date_formats = [
-                        '%d-%m-%Y', '%Y-%m-%d', '%m-%d-%Y',
-                        '%d-%m-%y', '%y-%m-%d', '%m-%d-%y'
-                    ]
-                    
-                    for date_format in date_formats:
-                        try:
-                            parsed_date = datetime.strptime(date_str, date_format)
-                            # Jeśli rok jest dwucyfrowy i < 50, dodaj 2000
-                            if parsed_date.year < 1950:
-                                parsed_date = parsed_date.replace(year=parsed_date.year + 100)
-                            return parsed_date.strftime('%Y-%m-%d')
-                        except ValueError:
-                            continue
-                except ValueError:
-                    continue
-        return None
-
-    def detect_document_type(self, text: str) -> str:
-        """Wykrywa typ dokumentu (faktura, paragon, wyciąg bankowy)"""
-        text_lower = text.lower()
-        
-        bank_keywords = ['bank statement', 'wyciąg bankowy', 'kontoauszug', 'relevé bancaire', 
-                        'account statement', 'transaction history', 'historia transakcji',
-                        'chase', 'jpmorgan', 'checking account', 'savings account', 'statement period',
-                        'beginning balance', 'ending balance', 'deposits', 'withdrawals', 'checks']
-        invoice_keywords = ['faktura', 'invoice', 'rechnung', 'facture', 'bill']
-        receipt_keywords = ['paragon', 'receipt', 'quittung', 'reçu', 'ricevuta']
-        
-        if any(keyword in text_lower for keyword in bank_keywords):
-            return 'bank_statement'
-        elif any(keyword in text_lower for keyword in invoice_keywords):
-            return 'invoice'
-        elif any(keyword in text_lower for keyword in receipt_keywords):
-            return 'receipt'
-        
-        return 'unknown'
-
-    def parse_bank_statement(self, text: str) -> List[Dict]:
-        """Specjalne parsowanie wyciągów bankowych"""
-        transactions = []
-        lines = text.split('\n')
-        
-        # Check if this is a Chase bank statement
-        is_chase = 'chase' in text.lower() or 'jpmorgan' in text.lower()
-        
-        if is_chase:
-            return self.parse_chase_statement(text)
-        
-        for i, line in enumerate(lines):
-            # Szukaj linii z datą i kwotą
-            date_match = None
-            for pattern in self.date_patterns:
-                date_match = re.search(pattern, line)
-                if date_match:
-                    break
-            
-            if date_match:
-                amount, currency = self.extract_amount_with_currency(line)
-                if amount:
-                    # Spróbuj znaleźć opis w tej samej linii lub następnych
-                    description = line.strip()
-                    
-                    # Usuń datę i kwotę z opisu
-                    description = re.sub(r'\d{1,2}[./-]\d{1,2}[./-]\d{4}', '', description)
-                    description = re.sub(r'[-+]?\d+[.,]\d{2}', '', description)
-                    description = description.strip()
-                    
-                    if not description and i + 1 < len(lines):
-                        description = lines[i + 1].strip()
-                    
-                    transaction = {
-                        'date': self.extract_date_advanced(line),
-                        'amount': abs(amount),  # Zawsze dodatnia wartość
-                        'description': description or 'Transakcja bankowa',
-                        'currency': currency,
-                        'type': 'bank_transaction'
-                    }
-                    transactions.append(transaction)
-        
-        return transactions
-    
-    def parse_chase_statement(self, text: str) -> List[Dict]:
-        """Specialized parsing for Chase bank statements"""
-        transactions = []
-        lines = text.split('\n')
-        
-        print(f"🏦 Parsing Chase bank statement with {len(lines)} lines")
-        print(f"📄 First 10 lines preview:")
-        for i, line in enumerate(lines[:10]):
-            print(f"  {i+1}: {line.strip()}")
-        
-        for line_num, line in enumerate(lines):
-            line = line.strip()
-            if not line:
-                continue
-            
-            print(f"🔍 Checking line {line_num}: {line}")
-            
-            # Try multiple patterns for Chase transactions
-            transaction = None
-            
-            # Pattern 1: Full transaction line with date, description, and amount
-            chase_match = re.search(self.chase_patterns['transaction_line'], line)
-            if chase_match:
-                print(f"✓ Pattern 1 matched: {chase_match.groups()}")
-                transaction = self._parse_chase_transaction_from_match(chase_match)
-            
-            # Pattern 2: Simple date and description, look for amount in same or next line
-            if not transaction:
-                simple_match = re.search(self.chase_patterns['simple_transaction'], line)
-                if simple_match:
-                    print(f"✓ Pattern 2 matched: {simple_match.groups()}")
-                    # Look for amount in the same line or next lines
-                    amount_match = re.search(self.chase_patterns['amount_only'], line)
-                    if not amount_match and line_num + 1 < len(lines):
-                        amount_match = re.search(self.chase_patterns['amount_only'], lines[line_num + 1])
-                    
-                    if amount_match:
-                        date_str, description = simple_match.groups()
-                        amount_str = amount_match.group(1) if amount_match.group(1) else amount_match.group(0)
-                        transaction = self._create_chase_transaction(date_str, description, amount_str)
-            
-            # Pattern 3: Look for any line with date pattern
-            if not transaction:
-                date_match = re.search(r'(\d{1,2}/\d{1,2})', line)
-                if date_match:
-                    print(f"✓ Date found: {date_match.group(1)}")
-                    # Extract everything after date as description
-                    parts = line.split(date_match.group(1), 1)
-                    if len(parts) > 1:
-                        rest = parts[1].strip()
-                        # Look for amount in the rest
-                        amount_match = re.search(self.chase_patterns['amount_only'], rest)
-                        if amount_match:
-                            description = re.sub(self.chase_patterns['amount_only'], '', rest).strip()
-                            amount_str = amount_match.group(1) if amount_match.group(1) else amount_match.group(0)
-                            transaction = self._create_chase_transaction(date_match.group(1), description, amount_str)
-            
-            if transaction:
-                transactions.append(transaction)
-                print(f"✅ Added transaction: {transaction}")
-        
-                 print(f"🏦 Chase parsing complete: {len(transactions)} transactions found")
-         return transactions
-     
-     def _parse_chase_transaction_from_match(self, match) -> Optional[Dict]:
-         """Parse Chase transaction from regex match"""
-         try:
-             if len(match.groups()) == 3:
-                 date_str, description, amount_str = match.groups()
-                 return self._create_chase_transaction(date_str, description, amount_str)
-             return None
-         except Exception as e:
-             print(f"❌ Error parsing Chase match: {e}")
-             return None
-     
-     def _create_chase_transaction(self, date_str: str, description: str, amount_str: str) -> Optional[Dict]:
-         """Create Chase transaction dictionary"""
-         try:
-             # Parse amount
-             amount_str = amount_str.replace('$', '').replace(',', '')
-             amount = abs(float(amount_str))
-             
-             # Parse date (MM/DD format, assume current year)
-             date_formatted = datetime.now().strftime('%Y-%m-%d')  # Default to today
-             if date_str:
-                 try:
-                     # Handle different date separators
-                     date_str = date_str.replace('-', '/')
-                     current_year = datetime.now().year
-                     full_date = f"{date_str}/{current_year}"
-                     parsed_date = datetime.strptime(full_date, '%m/%d/%Y')
-                     date_formatted = parsed_date.strftime('%Y-%m-%d')
-                 except ValueError:
-                     pass  # Keep default date
-             
-             # Clean description
-             description = description.strip()
-             if len(description) < 3:
-                 description = "Chase Transaction"
-             
-             transaction = {
-                 'date': date_formatted,
-                 'amount': amount,
-                 'description': description,
-                 'currency': 'USD',
-                 'type': 'chase_transaction',
-                 'category': self.categorize_expense_advanced(description, amount, 'bank_statement')
-             }
-             
-             print(f"✅ Created Chase transaction: {date_formatted} - {description} - ${amount}")
-             return transaction
-             
-         except Exception as e:
-             print(f"❌ Error creating Chase transaction: {e}")
-             return None
-
-    def categorize_expense_advanced(self, description: str, amount: float, doc_type: str) -> str:
-        """Zaawansowana kategoryzacja z uwzględnieniem typu dokumentu i kwoty"""
-        description_lower = description.lower()
-        
-        # Kategorie z słowami kluczowymi w różnych językach
-        categories = {
-            'Transport': [
-                'paliwo', 'benzyna', 'diesel', 'autobus', 'taxi', 'uber', 'parking',
-                'fuel', 'gas', 'petrol', 'bus', 'train', 'flight', 'car',
-                'kraftstoff', 'benzin', 'zug', 'flug', 'auto'
-            ],
-            'Żywność': [
-                'restauracja', 'jedzenie', 'lunch', 'kawa', 'catering', 'sklep',
-                'restaurant', 'food', 'lunch', 'coffee', 'grocery', 'supermarket',
-                'restaurant', 'essen', 'kaffee', 'supermarkt'
-            ],
-            'Biuro': [
-                'papier', 'długopisy', 'biuro', 'materiały', 'kancelaria',
-                'office', 'paper', 'supplies', 'stationery',
-                'büro', 'papier', 'büromaterial'
-            ],
-            'IT': [
-                'komputer', 'laptop', 'software', 'internet', 'hosting', 'domena',
-                'computer', 'software', 'internet', 'hosting', 'domain',
-                'computer', 'software', 'internet'
-            ],
-            'Usługi bankowe': [
-                'prowizja', 'opłata', 'commission', 'fee', 'gebühr', 'bank'
-            ],
-            'Zakupy': [
-                'sklep', 'market', 'shop', 'store', 'geschäft', 'magasin'
-            ]
-        }
-        
-        # Kategoryzacja na podstawie kwoty (dla transakcji bankowych)
-        if doc_type == 'bank_statement':
-            if amount < 10:
-                return 'Opłaty bankowe'
-            elif amount > 1000:
-                return 'Duże wydatki'
-        
-        # Standardowa kategoryzacja
-        for category, keywords in categories.items():
-            if any(keyword in description_lower for keyword in keywords):
-                return category
-        
-        return 'Inne'
-
-    def parse_pdf_file(self, pdf_path: str) -> Dict:
-        """
-        Główna funkcja do parsowania pliku PDF z obsługą różnych typów dokumentów
-        """
+    def parse_pdf_to_structured_data(self, pdf_path: str) -> Dict:
+        """Main function: Parse ANY PDF to structured data"""
         try:
-            # Wyodrębnij tekst z PDF
+            # Extract text from PDF
             text = self.extract_text_from_pdf(pdf_path)
             
             if not text.strip():
                 return {
-                    'error': 'Nie udało się wyodrębnić tekstu z PDF',
+                    'error': 'No text found in PDF',
                     'fileName': pdf_path.split('/')[-1],
                     'success': False
                 }
             
-            # Wykryj typ dokumentu
-            doc_type = self.detect_document_type(text)
+            print(f"📄 PDF loaded: {len(text)} characters")
+            print(f"📄 First 200 chars: {text[:200]}...")
             
-            print(f"📄 Document type detected: {doc_type}")
-            print(f"📄 Text preview (first 500 chars): {text[:500]}")
+            # Parse the text into structured data
+            structured_data = self._extract_structured_data(text)
             
-            if doc_type == 'bank_statement':
-                # Parsuj wyciąg bankowy
-                transactions = self.parse_bank_statement(text)
-                print(f"🏦 Found {len(transactions)} transactions")
-                return {
-                    'transactions': transactions,
-                    'document_type': doc_type,
-                    'fileName': pdf_path.split('/')[-1],
-                    'success': len(transactions) > 0
-                }
-            else:
-                # Parsuj standardowy dokument (faktura/paragon)
-                amount, currency = self.extract_amount_with_currency(text)
-                date = self.extract_date_advanced(text)
-                vendor = self.extract_vendor(text)
-                description = self.generate_description(text, vendor)
-                category = self.categorize_expense_advanced(description, amount or 0, doc_type)
-                
-                print(f"📄 Parsed single document: amount={amount}, date={date}, vendor={vendor}")
-                
-                return {
-                    'description': description,
-                    'amount': amount or 0.0,
-                    'currency': currency,
-                    'date': date or datetime.now().strftime('%Y-%m-%d'),
-                    'category': category,
-                    'vendor': vendor,
-                    'document_type': doc_type,
-                    'fileName': pdf_path.split('/')[-1],
-                    'success': amount is not None and amount > 0
-                }
-                
+            return {
+                'structured_data': structured_data,
+                'raw_text': text,
+                'fileName': pdf_path.split('/')[-1],
+                'success': True,
+                'total_rows': len(structured_data)
+            }
+            
         except Exception as e:
             return {
                 'error': str(e),
@@ -456,225 +85,175 @@ class ExpenseParser:
                 'success': False
             }
 
-    def extract_vendor(self, text: str) -> Optional[str]:
-        """Wyodrębnia nazwę dostawcy z tekstu - rozszerzone o formaty międzynarodowe"""
-        for pattern in self.vendor_patterns:
-            matches = re.findall(pattern, text, re.IGNORECASE | re.MULTILINE)
-            if matches:
-                vendor = matches[0].strip()
-                if len(vendor) > 3 and not vendor.isdigit():
-                    return vendor
-        return None
+    def _extract_structured_data(self, text: str) -> List[Dict]:
+        """Extract structured data from text"""
+        lines = text.split('\n')
+        structured_data = []
+        
+        print(f"🔍 Processing {len(lines)} lines...")
+        
+        for line_num, line in enumerate(lines):
+            line = line.strip()
+            if not line or len(line) < 3:
+                continue
+            
+            # Extract data from this line
+            row_data = self._extract_line_data(line, line_num)
+            if row_data:
+                structured_data.append(row_data)
+        
+        print(f"✅ Extracted {len(structured_data)} structured rows")
+        return structured_data
 
-    def generate_description(self, text: str, vendor: Optional[str]) -> str:
-        """Generuje opis wydatku na podstawie dostępnych danych"""
-        if vendor:
-            return f"Wydatek - {vendor}"
-        
-        # Spróbuj wyodrębnić znaczące słowa z tekstu
-        words = re.findall(r'\b[a-ząćęłńóśźż]{4,}\b', text, re.IGNORECASE)
-        if words:
-            return f"Wydatek - {' '.join(words[:3])}"
-        
-        return "Nierozpoznany wydatek"
+    def _extract_line_data(self, line: str, line_num: int) -> Optional[Dict]:
+        """Extract data from a single line"""
+        try:
+            # Look for amounts
+            amounts = []
+            for pattern in self.data_patterns['amounts']:
+                matches = re.findall(pattern, line)
+                amounts.extend([float(match.replace('$', '').replace(',', '')) for match in matches])
+            
+            # Look for dates
+            dates = []
+            for pattern in self.data_patterns['dates']:
+                matches = re.findall(pattern, line)
+                dates.extend(matches)
+            
+            # Look for emails
+            emails = []
+            for pattern in self.data_patterns['emails']:
+                matches = re.findall(pattern, line)
+                emails.extend(matches)
+            
+            # Look for phones
+            phones = []
+            for pattern in self.data_patterns['phones']:
+                matches = re.findall(pattern, line)
+                phones.extend(matches)
+            
+            # Create row data
+            row_data = {
+                'line_number': line_num + 1,
+                'raw_text': line,
+                'amounts': amounts,
+                'dates': dates,
+                'emails': emails,
+                'phones': phones,
+                'word_count': len(line.split()),
+                'has_numbers': bool(re.search(r'\d', line)),
+                'has_currency': bool(re.search(r'[\$€£¥]', line))
+            }
+            
+            # Add extracted values as separate columns
+            if amounts:
+                row_data['primary_amount'] = amounts[0]
+                row_data['all_amounts'] = amounts
+            if dates:
+                row_data['primary_date'] = dates[0]
+                row_data['all_dates'] = dates
+            if emails:
+                row_data['primary_email'] = emails[0]
+                row_data['all_emails'] = emails
+            if phones:
+                row_data['primary_phone'] = phones[0]
+                row_data['all_phones'] = phones
+            
+            return row_data
+            
+        except Exception as e:
+            print(f"❌ Error processing line {line_num}: {e}")
+            return None
 
-    def create_expense_dataframe(self, expenses_data: List[Dict]) -> pd.DataFrame:
-        """
-        Tworzy DataFrame pandas z danych o wydatkach
-        """
-        successful_expenses = [exp for exp in expenses_data if exp.get('success')]
-        
-        if not successful_expenses:
+    def create_dataframe(self, structured_data: List[Dict]) -> pd.DataFrame:
+        """Convert structured data to pandas DataFrame"""
+        if not structured_data:
             return pd.DataFrame()
         
-        # Rozwiń transakcje bankowe
-        all_expenses = []
-        for expense in successful_expenses:
-            if 'transactions' in expense:
-                # Wyciąg bankowy z wieloma transakcjami
-                for transaction in expense['transactions']:
-                    all_expenses.append({
-                        'description': transaction['description'],
-                        'amount': transaction['amount'],
-                        'currency': transaction.get('currency', 'PLN'),
-                        'date': transaction['date'],
-                        'category': self.categorize_expense_advanced(
-                            transaction['description'], 
-                            transaction['amount'], 
-                            'bank_statement'
-                        ),
-                        'vendor': '',
-                        'document_type': 'bank_statement',
-                        'fileName': expense['fileName']
-                    })
-            else:
-                # Pojedynczy dokument
-                all_expenses.append(expense)
+        df = pd.DataFrame(structured_data)
         
-        df = pd.DataFrame(all_expenses)
+        # Clean up the DataFrame
+        df = df.fillna('')
         
-        # Konwersja typów danych
-        if not df.empty:
-            df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
-            df['date'] = pd.to_datetime(df['date'], errors='coerce')
-            
-            # Sortuj po dacie
-            df = df.sort_values('date', ascending=False)
+        # Convert lists to strings for better Excel export
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                df[col] = df[col].astype(str).str.replace('[', '').str.replace(']', '')
         
         return df
 
-    def generate_summary_report(self, df: pd.DataFrame) -> Dict:
-        """
-        Generuje raport podsumowujący z analizą wydatków
-        """
-        if df.empty:
-            return {}
-        
-        summary = {
-            'total_expenses': len(df),
-            'total_amount': df['amount'].sum(),
-            'date_range': {
-                'from': df['date'].min().strftime('%Y-%m-%d') if not df['date'].isna().all() else None,
-                'to': df['date'].max().strftime('%Y-%m-%d') if not df['date'].isna().all() else None
-            },
-            'by_category': df.groupby('category')['amount'].agg(['sum', 'count']).to_dict('index'),
-            'by_currency': df.groupby('currency')['amount'].sum().to_dict(),
-            'by_month': df.groupby(df['date'].dt.to_period('M'))['amount'].sum().to_dict(),
-            'average_expense': df['amount'].mean(),
-            'largest_expense': {
-                'amount': df['amount'].max(),
-                'description': df.loc[df['amount'].idxmax(), 'description']
-            }
-        }
-        
-        return summary
-
-    def export_to_excel_advanced(self, expenses_data: List[Dict], output_path: str):
-        """
-        Zaawansowany eksport do Excel z wieloma arkuszami i analizą
-        """
-        df = self.create_expense_dataframe(expenses_data)
+    def export_to_excel(self, structured_data: List[Dict], output_path: str):
+        """Export to Excel with multiple sheets"""
+        df = self.create_dataframe(structured_data)
         
         if df.empty:
-            raise Exception("Brak danych do eksportu")
-        
-        # Zmień nazwy kolumn na polskie
-        column_mapping = {
-            'description': 'Opis wydatku',
-            'amount': 'Kwota',
-            'currency': 'Waluta',
-            'date': 'Data',
-            'category': 'Kategoria',
-            'vendor': 'Dostawca',
-            'document_type': 'Typ dokumentu',
-            'fileName': 'Plik źródłowy'
-        }
-        
-        df_export = df.rename(columns=column_mapping)
+            raise Exception("No data to export")
         
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            # Arkusz główny z wszystkimi wydatkami
-            df_export.to_excel(writer, sheet_name='Wszystkie wydatki', index=False)
+            # Main data sheet
+            df.to_excel(writer, sheet_name='Extracted Data', index=False)
             
-            # Arkusz z podsumowaniem
-            summary = self.generate_summary_report(df)
-            if summary:
-                summary_df = pd.DataFrame([
-                    ['Łączna liczba wydatków', summary['total_expenses']],
-                    ['Łączna kwota', f"{summary['total_amount']:.2f}"],
-                    ['Średni wydatek', f"{summary['average_expense']:.2f}"],
-                    ['Największy wydatek', f"{summary['largest_expense']['amount']:.2f} - {summary['largest_expense']['description']}"],
-                    ['Okres', f"{summary['date_range']['from']} do {summary['date_range']['to']}"]
-                ], columns=['Metryka', 'Wartość'])
-                
-                summary_df.to_excel(writer, sheet_name='Podsumowanie', index=False)
+            # Summary sheet
+            summary_data = [
+                ['Total Rows', len(df)],
+                ['Lines with Amounts', len(df[df['amounts'].str.len() > 0])],
+                ['Lines with Dates', len(df[df['dates'].str.len() > 0])],
+                ['Lines with Emails', len(df[df['emails'].str.len() > 0])],
+                ['Lines with Phones', len(df[df['phones'].str.len() > 0])],
+                ['Lines with Numbers', df['has_numbers'].sum()],
+                ['Lines with Currency', df['has_currency'].sum()],
+                ['Total Word Count', df['word_count'].sum()]
+            ]
             
-            # Arkusz z wydatkami per kategoria
-            if not df.empty:
-                category_summary = df.groupby('category').agg({
-                    'amount': ['sum', 'count', 'mean']
-                }).round(2)
-                category_summary.columns = ['Suma', 'Liczba', 'Średnia']
-                category_summary.to_excel(writer, sheet_name='Per kategoria')
+            summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+            
+            # Data types sheet
+            data_types = []
+            for col in df.columns:
+                non_empty = df[col].astype(str).str.strip().ne('').sum()
+                data_types.append([col, non_empty, len(df) - non_empty])
+            
+            types_df = pd.DataFrame(data_types, columns=['Column', 'Non-Empty', 'Empty'])
+            types_df.to_excel(writer, sheet_name='Data Types', index=False)
+        
+        print(f"✅ Excel file exported: {output_path}")
 
-    def export_to_csv_advanced(self, expenses_data: List[Dict], output_path: str):
-        """
-        Zaawansowany eksport do CSV z polskimi znakami
-        """
-        df = self.create_expense_dataframe(expenses_data)
+    def export_to_csv(self, structured_data: List[Dict], output_path: str):
+        """Export to CSV"""
+        df = self.create_dataframe(structured_data)
         
         if df.empty:
-            raise Exception("Brak danych do eksportu")
+            raise Exception("No data to export")
         
-        # Zmień nazwy kolumn na polskie
-        column_mapping = {
-            'description': 'Opis wydatku',
-            'amount': 'Kwota',
-            'currency': 'Waluta', 
-            'date': 'Data',
-            'category': 'Kategoria',
-            'vendor': 'Dostawca',
-            'document_type': 'Typ dokumentu',
-            'fileName': 'Plik źródłowy'
-        }
-        
-        df_export = df.rename(columns=column_mapping)
-        df_export.to_csv(output_path, index=False, encoding='utf-8-sig', sep=';')
+        df.to_csv(output_path, index=False, encoding='utf-8-sig')
+        print(f"✅ CSV file exported: {output_path}")
 
-# Przykład użycia
 def main():
-    """
-    Przykład użycia rozszerzonego parsera PDF
-    """
-    parser = ExpenseParser()
+    """Example usage"""
+    parser = UniversalPDFParser()
     
-    # Lista plików PDF do przetworzenia
-    pdf_files = [
-        'faktura1.pdf',
-        'wyciag_bankowy.pdf',
-        'paragon1.pdf', 
-        'bank_statement_en.pdf'
-    ]
+    # Test with a PDF file
+    pdf_file = 'test.pdf'  # Replace with your PDF path
     
-    # Przetwórz wszystkie pliki
-    print("Rozpoczynam parsowanie plików PDF...")
-    results = []
-    
-    for pdf_file in pdf_files:
-        try:
-            result = parser.parse_pdf_file(pdf_file)
-            results.append(result)
+    try:
+        print("🚀 Starting universal PDF parsing...")
+        
+        # Parse PDF to structured data
+        result = parser.parse_pdf_to_structured_data(pdf_file)
+        
+        if result['success']:
+            print(f"✅ Successfully parsed {result['total_rows']} rows")
             
-            if result['success']:
-                if 'transactions' in result:
-                    print(f"✓ {result['fileName']}: Wyciąg bankowy - {len(result['transactions'])} transakcji")
-                else:
-                    print(f"✓ {result['fileName']}: {result['description']} - {result['amount']} {result.get('currency', 'PLN')}")
-            else:
-                print(f"✗ {result['fileName']}: Błąd - {result['error']}")
-        except FileNotFoundError:
-            print(f"✗ {pdf_file}: Plik nie został znaleziony")
-    
-    # Eksportuj do plików
-    if results:
-        try:
-            parser.export_to_csv_advanced(results, 'wydatki_advanced.csv')
-            parser.export_to_excel_advanced(results, 'wydatki_advanced.xlsx')
-            print("\nPliki zostały wyeksportowane:")
-            print("- wydatki_advanced.csv")
-            print("- wydatki_advanced.xlsx")
+            # Export to Excel and CSV
+            parser.export_to_excel(result['structured_data'], 'extracted_data.xlsx')
+            parser.export_to_csv(result['structured_data'], 'extracted_data.csv')
             
-            # Pokaż podsumowanie
-            df = parser.create_expense_dataframe(results)
-            if not df.empty:
-                summary = parser.generate_summary_report(df)
-                print(f"\nPodsumowanie:")
-                print(f"- Łączna liczba wydatków: {summary['total_expenses']}")
-                print(f"- Łączna kwota: {summary['total_amount']:.2f}")
-                print(f"- Średni wydatek: {summary['average_expense']:.2f}")
-                
-        except Exception as e:
-            print(f"Błąd podczas eksportu: {e}")
+        else:
+            print(f"❌ Error: {result['error']}")
+            
+    except Exception as e:
+        print(f"❌ Error: {e}")
 
 if __name__ == "__main__":
     main()
