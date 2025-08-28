@@ -483,22 +483,44 @@ class UniversalPDFParser:
             return 0.0
 
     def create_dataframe(self, data: List[Dict[str, Any]]) -> pd.DataFrame:
-        """Create DataFrame with enhanced banking columns"""
+        """Create DataFrame with only essential columns: Date, Description, Amount"""
         if not data:
             return pd.DataFrame()
         
         # Convert to DataFrame
         df = pd.DataFrame(data)
         
+        # Filter only essential columns for clean output
+        essential_columns = ['date', 'description', 'amount']
+        available_columns = [col for col in essential_columns if col in df.columns]
+        
+        # Create clean DataFrame with only essential columns
+        clean_df = df[available_columns].copy()
+        
+        # Rename columns to match desired format
+        column_mapping = {
+            'date': 'Date',
+            'description': 'Description', 
+            'amount': 'Amount'
+        }
+        
+        clean_df = clean_df.rename(columns=column_mapping)
+        
         # Handle NaN values
-        df = df.fillna('')
+        clean_df = clean_df.fillna('')
         
-        # Convert lists to strings for export
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].astype(str)
+        # Convert amount to numeric and remove decimals if they're 0
+        if 'Amount' in clean_df.columns:
+            clean_df['Amount'] = pd.to_numeric(clean_df['Amount'], errors='coerce').fillna(0)
+            # Remove .0 if amount is whole number
+            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: int(x) if x == int(x) else x)
         
-        return df
+        # Convert to strings for export
+        for col in clean_df.columns:
+            if clean_df[col].dtype == 'object':
+                clean_df[col] = clean_df[col].astype(str)
+        
+        return clean_df
 
     def export_to_excel(self, data: List[Dict[str, Any]], filename: str = None) -> str:
         """Export to Excel with enhanced banking sheets"""
