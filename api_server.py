@@ -11,15 +11,16 @@ from pdf_expense_parser import ExpenseParser
 app = Flask(__name__)
 
 # --- CORS: czytane z ENV, z sensownym domyślnym zestawem ---
-# USTAW w EB: ALLOWED_ORIGINS="https://apis.dupajasia.com,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
+# USTAW w Render: ALLOWED_ORIGINS="https://apis.dupajasia.com,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
     "https://apis.dupajasia.com,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
 ).split(",")
 
+# Apply CORS to all routes
 CORS(
     app,
-    resources={r"/api/*": {"origins": [o.strip() for o in ALLOWED_ORIGINS]}},
+    origins=[o.strip() for o in ALLOWED_ORIGINS],
     supports_credentials=True,
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -204,6 +205,22 @@ def health_check():
         'status': 'OK',
         'message': 'Enhanced PDF Parser API działa poprawnie',
         'supabase_enabled': SUPABASE_ENABLED,
+    })
+
+@app.route('/api/health', methods=['GET'])
+def api_health_check():
+    """API Healthcheck endpoint"""
+    return jsonify({
+        'status': 'OK',
+        'message': 'Enhanced PDF Parser API działa poprawnie',
+        'supabase_enabled': SUPABASE_ENABLED,
+        'endpoints': {
+            'parse_pdf': '/api/parse-pdf',
+            'parse_multiple': '/api/parse-multiple-pdfs',
+            'export_csv': '/api/export-csv',
+            'export_excel': '/api/export-excel',
+            'analyze': '/api/analyze'
+        }
     })
 
 @app.route('/api/analyze', methods=['POST'])
