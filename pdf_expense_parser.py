@@ -19,6 +19,7 @@ class UniversalPDFParser:
             r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY
             r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD
             r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',  # DD MMM YYYY
+            r'\b\d{1,2}/\d{1,2}\b',  # MM/DD without year
         ]
         
         self.email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
@@ -107,7 +108,19 @@ class UniversalPDFParser:
                 if parsed_line:
                     structured_data.append(parsed_line)
         
-        return structured_data
+        # Keep only rows that have both a date and a non-zero amount
+        filtered = []
+        for row in structured_data:
+            date_str = str(row.get('date') or '').strip()
+            amount_val = row.get('amount')
+            try:
+                amount_num = float(amount_val) if amount_val is not None else 0.0
+            except Exception:
+                amount_num = 0.0
+            if date_str and amount_num != 0.0:
+                filtered.append(row)
+        
+        return filtered
 
     def _is_non_transaction_line(self, line: str) -> bool:
         """Check if line should be skipped - comprehensive filtering for Chase statements"""
@@ -169,11 +182,11 @@ class UniversalPDFParser:
         return False
 
     def _looks_like_transaction(self, line: str) -> bool:
-        """Check if line looks like a transaction - strict filtering for Chase"""
+        """Check if line looks like a transaction - balanced filtering for Chase"""
         # Must have sufficient text for a real transaction
-        has_text = len(line.split()) >= 4  # At least 4 words for real transactions
+        has_text = len(line.split()) >= 3  # At least 3 words (reduced from 4)
         
-        # MUST have a valid date format (required for transactions)
+        # Must have EITHER a valid date format OR Chase keywords (not both required)
         has_valid_date = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)) or \
                         bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)) or \
                         bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
@@ -183,7 +196,8 @@ class UniversalPDFParser:
             'Direct Deposit', 'ATM', 'Cash', 'Deposit', 'Withdraw', 'Card Purchase', 
             'Payment Sent', 'Square Inc', 'Recurring', 'With Pin', 'CA Card', 'Confirmation',
             'Check Deposit', 'Electronic Deposit', 'ACH', 'Credit', 'Debit', 'Purchase',
-            'Transfer', 'Online', 'PMT', 'Merchant', 'Service', 'VISA', 'Mastercard'
+            'Transfer', 'Online', 'PMT', 'Merchant', 'Service', 'VISA', 'Mastercard',
+            'Deposit', 'Withdrawal', 'Transaction', 'Purchase', 'Payment', 'Transfer'
         ]
         has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_transaction_keywords)
         
@@ -196,125 +210,147 @@ class UniversalPDFParser:
         ]
         has_obvious_garbage = any(indicator.lower() in line.lower() for indicator in obvious_garbage_indicators)
         
-        # Line is a transaction if it has text AND valid date AND Chase keywords AND NO obvious garbage
-        return has_text and has_valid_date and has_chase_keywords and not has_obvious_garbage
+        # Line is a transaction if it has text AND (valid date OR Chase keywords) AND NO obvious garbage
+        return has_text and (has_valid_date or has_chase_keywords) and not has_obvious_garbage
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse transaction data - enhanced for Chase statements"""
         
         # Enhanced transaction patterns for Chase
         transaction_patterns = [
-            # Pattern 1: MM/DD/YYYY Description Amount
+            # 0: MM/DD/YYYY Description Amount
             r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([\d,]+\.?\d*)',
-            # Pattern 2: Month DD Description Amount (Feb 17 ATM Cash Deposit... 9549.00)
+            # 1: Month DD Description Amount (Feb 17 ATM Cash Deposit... 9549.00)
             r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+?)\s+([\d,]+\.?\d*)',
-            # Pattern 3: Description Date Amount
+            # 2: Description Date Amount
             r'(.+?)\s+(\d{1,2}/\d{1,2}/\d{4})\s+([\d,]+\.?\d*)',
-            # Pattern 4: Date Description Ref Amount
+            # 3: Date Description Ref Amount
             r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([A-Z0-9]+)\s+([\d,]+\.?\d*)',
-            # Pattern 5: Month DD Description (more flexible)
+            # 4: Month DD Description (more flexible)
             r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+)',
-            # Pattern 6: Month DD Description Amount (without spaces)
+            # 5: Month DD Description Amount (without spaces)
             r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+?)([\d,]+\.?\d*)',
-            # Pattern 7: YYYY-MM-DD Description (new format)
+            # 6: YYYY-MM-DD Description (new format)
             r'(\d{4}-\d{1,2}-\d{1,2})\s+(.+)',
-            # Pattern 8: Description YYYY-MM-DD (reversed)
+            # 7: Description YYYY-MM-DD (reversed)
             r'(.+?)\s+(\d{4}-\d{1,2}-\d{1,2})',
+            # 8: MM/DD Description Amount (no year)
+            r'(\d{1,2}/\d{1,2})\s+(.+?)\s+([\d,]+\.?\d*)',
         ]
         
-        for pattern in transaction_patterns:
+        for idx, pattern in enumerate(transaction_patterns):
             match = re.search(pattern, line, re.IGNORECASE)
-            if match:
-                groups = match.groups()
-                
-                if len(groups) == 3:  # Date Description Amount
-                    if pattern == transaction_patterns[1]:  # Month DD Description Amount
-                        month, day, description, amount = groups[0], groups[1], groups[2], groups[3]
-                        date = self._convert_month_day_to_date(month, day)
-                    else:
-                        date, description, amount = groups
-                    
-                    return {
-                        'date': self._format_date(date.strip()),
-                        'description': description.strip(),
-                        'amount': self._parse_amount(amount),
-                        'amount_raw': amount,
-                        'section': section,
-                        'line_number': line_num,
-                        'full_text': line
-                    }
-                
-                elif len(groups) == 4:  # Date Description Ref Amount
-                    date, description, ref, amount = groups
-                    return {
-                        'date': self._format_date(date.strip()),
-                        'description': f"{description.strip()} (Ref: {ref.strip()})",
-                        'amount': self._parse_amount(amount),
-                        'amount_raw': amount,
-                        'section': section,
-                        'line_number': line_num,
-                        'full_text': line
-                    }
-                
-                elif len(groups) == 3 and pattern == transaction_patterns[4]:  # Month DD Description
-                    month, day, description = groups
-                    date = self._convert_month_day_to_date(month, day)
-                    # Try to find amount in description - improved extraction
-                    amount = self._extract_amount_from_text(description)
-                    
-                    return {
-                        'date': self._format_date(date),
-                        'description': description.strip(),
-                        'amount': amount,
-                        'amount_raw': str(amount),
-                        'section': section,
-                        'line_number': line_num,
-                        'full_text': line
-                    }
-                
-                elif len(groups) == 4 and pattern == transaction_patterns[5]:  # Month DD Description Amount
-                    month, day, description, amount = groups
-                    date = self._convert_month_day_to_date(month, day)
-                    
-                    return {
-                        'date': self._format_date(date),
-                        'description': description.strip(),
-                        'amount': self._parse_amount(amount),
-                        'amount_raw': amount,
-                        'section': section,
-                        'line_number': line_num,
-                        'full_text': line
-                    }
-                
-                elif len(groups) == 2 and pattern == transaction_patterns[6]:  # YYYY-MM-DD Description
-                    date, description = groups
-                    # Try to find amount in description
-                    amount = self._extract_amount_from_text(description)
-                    
-                    return {
-                        'date': self._format_date(date),
-                        'description': description.strip(),
-                        'amount': amount,
-                        'amount_raw': str(amount),
-                        'section': section,
-                        'line_number': line_num,
-                        'full_text': line
-                    }
-                
-                elif len(groups) == 2 and pattern == transaction_patterns[7]:  # Description YYYY-MM-DD
-                    description, date = groups
-                    # Try to find amount in description
-                    amount = self._extract_amount_from_text(description)
-                    
-                    return {
-                        'date': self._format_date(date),
-                        'description': description.strip(),
-                        'amount': amount,
-                        'amount_raw': str(amount),
-                        'section': section,
-                        'line_number': line_num,
-                        'full_text': line
-                    }
+            if not match:
+                continue
+            groups = match.groups()
+            
+            if idx == 0:  # MM/DD/YYYY Description Amount
+                date, description, amount = groups
+                parsed_date = self._format_date(date.strip())
+                return {
+                    'date': parsed_date,
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 1:  # Month DD Description Amount
+                month, day, description, amount = groups
+                date = self._convert_month_day_to_date(month, day)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 2:  # Description Date Amount
+                description, date, amount = groups
+                return {
+                    'date': self._format_date(date.strip()),
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 3:  # Date Description Ref Amount
+                date, description, ref, amount = groups
+                return {
+                    'date': self._format_date(date.strip()),
+                    'description': f"{description.strip()} (Ref: {ref.strip()})",
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 4:  # Month DD Description (find amount later)
+                month, day, description = groups
+                date = self._convert_month_day_to_date(month, day)
+                amount = self._extract_amount_from_text(description)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': amount,
+                    'amount_raw': str(amount),
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 5:  # Month DD Description Amount (tight)
+                month, day, description, amount = groups
+                date = self._convert_month_day_to_date(month, day)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 6:  # YYYY-MM-DD Description
+                date, description = groups
+                amount = self._extract_amount_from_text(description)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': amount,
+                    'amount_raw': str(amount),
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 7:  # Description YYYY-MM-DD
+                description, date = groups
+                amount = self._extract_amount_from_text(description)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': amount,
+                    'amount_raw': str(amount),
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 8:  # MM/DD Description Amount (no year)
+                mmdd, description, amount = groups
+                date = self._format_date(mmdd)
+                return {
+                    'date': date,
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
         
         # If no pattern matches, try to extract what we can
         return self._extract_fallback_transaction(line, section, line_num)
@@ -377,7 +413,7 @@ class UniversalPDFParser:
         return f"{current_year}-{month_num}-{day_num}"
 
     def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Fallback extraction when no pattern matches - strict filtering"""
+        """Fallback extraction when no pattern matches - balanced filtering"""
         # Only process lines that look like real transactions
         if not self._looks_like_transaction(line):
             return None
@@ -389,7 +425,7 @@ class UniversalPDFParser:
         amount_match = re.search(r'[\d,]+\.?\d*', line)
         
         # If we have any date-like pattern and some text, create a transaction
-        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 4:
+        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 3:
             if date_match:
                 date = date_match.group()
             elif month_match:
@@ -418,6 +454,21 @@ class UniversalPDFParser:
             return {
                 'date': self._format_date(date),
                 'description': description if description else 'Transaction',
+                'amount': amount,
+                'amount_raw': str(amount),
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        # If still no match but line looks promising, create a basic entry
+        if len(line.split()) >= 3 and not self._is_non_transaction_line(line):
+            # Try to extract any amount from the line
+            amount = self._extract_amount_from_text(line)
+            
+            return {
+                'date': '',
+                'description': line,
                 'amount': amount,
                 'amount_raw': str(amount),
                 'section': section,
