@@ -39,9 +39,19 @@ try:
 except Exception as e:
     print(f"⚠ Supabase not configured: {e}")
 
-@app.route('/api/parse-pdf', methods=['POST'])
+@app.route('/api/parse-pdf', methods=['POST', 'GET'])
 def parse_pdf_endpoint():
     """Parsowanie pojedynczego PDF (multipart/form-data, pole 'pdf')"""
+    
+    if request.method == 'GET':
+        return jsonify({
+            'message': 'PDF Parser Endpoint',
+            'method': 'POST',
+            'description': 'Send PDF file via POST request with form-data field "pdf"',
+            'example': 'Use POST method with multipart/form-data containing PDF file'
+        })
+    
+    # POST method - actual PDF parsing
     try:
         if 'pdf' not in request.files:
             return jsonify({'error': 'Brak pliku PDF'}), 400
