@@ -72,6 +72,18 @@ def parse_pdf_endpoint():
                 result['supabase_saved'] = False
                 result['supabase_error'] = str(e)
 
+        # Return data in format that frontend can export
+        if result.get('success') and result.get('structured_data'):
+            # Add the structured data for export
+            result['export_data'] = result['structured_data']
+            result['total_rows'] = len(result['structured_data'])
+            
+            # Show first few rows for debugging
+            if result['structured_data']:
+                first_row = result['structured_data'][0]
+                print(f"✅ First row keys: {list(first_row.keys())}")
+                print(f"✅ First row sample: {first_row}")
+        
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -124,8 +136,16 @@ def export_csv_endpoint():
         if not expenses:
             return jsonify({'error': 'Brak danych do eksportu'}), 400
 
+        # Convert to DataFrame first for universal parser
+        try:
+            df = parser.create_dataframe(expenses)
+            if df.empty:
+                return jsonify({'error': 'No data to export'}), 400
+        except Exception as e:
+            return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
+        
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv', encoding='utf-8-sig') as tmp_file:
-            parser.export_to_csv(expenses, tmp_file.name)
+            df.to_csv(tmp_file.name, index=False, encoding='utf-8-sig')
             with open(tmp_file.name, 'r', encoding='utf-8-sig') as f:
                 csv_content = f.read()
             os.unlink(tmp_file.name)
@@ -133,6 +153,40 @@ def export_csv_endpoint():
         return jsonify({
             'csv_content': csv_content,
             'filename': f'wydatki_{datetime.now().strftime("%Y%m%d")}.csv'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/export-pdf-data-csv', methods=['POST'])
+def export_pdf_data_csv_endpoint():
+    """Eksport CSV z danych PDF (nowy endpoint dla universal parser)"""
+    try:
+        data = request.json or {}
+        pdf_data = data.get('pdf_data', [])
+        if not pdf_data:
+            return jsonify({'error': 'Brak danych PDF do eksportu'}), 400
+        
+        print(f"🔍 PDF CSV export: Received {len(pdf_data)} rows")
+        if pdf_data:
+            print(f"🔍 First row keys: {list(pdf_data[0].keys()) if isinstance(pdf_data[0], dict) else 'Not a dict'}")
+
+        # Convert to DataFrame
+        try:
+            df = parser.create_dataframe(pdf_data)
+            if df.empty:
+                return jsonify({'error': 'No data to export'}), 400
+        except Exception as e:
+            return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
+        
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv', encoding='utf-8-sig') as tmp_file:
+            df.to_csv(tmp_file.name, index=False, encoding='utf-8-sig')
+            with open(tmp_file.name, 'r', encoding='utf-8-sig') as f:
+                csv_content = f.read()
+            os.unlink(tmp_file.name)
+
+        return jsonify({
+            'csv_content': csv_content,
+            'filename': f'pdf_data_{datetime.now().strftime("%Y%m%d")}.csv'
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -146,9 +200,48 @@ def export_excel_endpoint():
         expenses = data.get('expenses', [])
         if not expenses:
             return jsonify({'error': 'Brak danych do eksportu'}), 400
+        
+        print(f"🔍 Excel export: Received {len(expenses)} expenses")
+        if expenses:
+            print(f"🔍 First expense keys: {list(expenses[0].keys()) if isinstance(expenses[0], dict) else 'Not a dict'}")
 
+        # Convert to DataFrame first for universal parser
+        try:
+            df = parser.create_dataframe(expenses)
+            if df.empty:
+                return jsonify({'error': 'No data to export'}), 400
+        except Exception as e:
+            return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
+        
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
-            parser.export_to_excel(expenses, tmp_file.name)
+            with pd.ExcelWriter(tmp_file.name, engine='openpyxl') as writer:
+                # Main data sheet
+                df.to_excel(writer, sheet_name='Extracted Data', index=False)
+                
+                # Summary sheet
+                summary_data = [
+                    ['Total Rows', len(df)],
+                    ['Lines with Amounts', len(df[df['amounts'].str.len() > 0]) if 'amounts' in df.columns else 0],
+                    ['Lines with Dates', len(df[df['dates'].str.len() > 0]) if 'dates' in df.columns else 0],
+                    ['Lines with Emails', len(df[df['emails'].str.len() > 0]) if 'emails' in df.columns else 0],
+                    ['Lines with Phones', len(df[df['phones'].str.len() > 0]) if 'phones' in df.columns else 0],
+                    ['Lines with Numbers', df['has_numbers'].sum() if 'has_numbers' in df.columns else 0],
+                    ['Lines with Currency', df['has_currency'].sum() if 'has_currency' in df.columns else 0],
+                    ['Total Word Count', df['word_count'].sum() if 'word_count' in df.columns else 0]
+                ]
+                
+                summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Data types sheet
+                data_types = []
+                for col in df.columns:
+                    non_empty = df[col].astype(str).str.strip().ne('').sum()
+                    data_types.append([col, non_empty, len(df) - non_empty])
+                
+                types_df = pd.DataFrame(data_types, columns=['Column', 'Non-Empty', 'Empty'])
+                types_df.to_excel(writer, sheet_name='Data Types', index=False)
+            
             with open(tmp_file.name, 'rb') as f:
                 excel_content = f.read()
             os.unlink(tmp_file.name)
@@ -157,6 +250,69 @@ def export_excel_endpoint():
         return jsonify({
             'excel_content': excel_b64,
             'filename': f'wydatki_{datetime.now().strftime("%Y%m%d")}.xlsx'
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/export-pdf-data-excel', methods=['POST'])
+def export_pdf_data_excel_endpoint():
+    """Eksport Excel z danych PDF (nowy endpoint dla universal parser)"""
+    try:
+        import base64
+        data = request.json or {}
+        pdf_data = data.get('pdf_data', [])
+        if not pdf_data:
+            return jsonify({'error': 'Brak danych PDF do eksportu'}), 400
+        
+        print(f"🔍 PDF Excel export: Received {len(pdf_data)} rows")
+        if pdf_data:
+            print(f"🔍 First row keys: {list(pdf_data[0].keys()) if isinstance(pdf_data[0], dict) else 'Not a dict'}")
+
+        # Convert to DataFrame
+        try:
+            df = parser.create_dataframe(pdf_data)
+            if df.empty:
+                return jsonify({'error': 'No data to export'}), 400
+        except Exception as e:
+            return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp_file:
+            with pd.ExcelWriter(tmp_file.name, engine='openpyxl') as writer:
+                # Main data sheet
+                df.to_excel(writer, sheet_name='Extracted Data', index=False)
+                
+                # Summary sheet
+                summary_data = [
+                    ['Total Rows', len(df)],
+                    ['Lines with Amounts', len(df[df['amounts'].str.len() > 0]) if 'amounts' in df.columns else 0],
+                    ['Lines with Dates', len(df[df['dates'].str.len() > 0]) if 'dates' in df.columns else 0],
+                    ['Lines with Emails', len(df[df['emails'].str.len() > 0]) if 'emails' in df.columns else 0],
+                    ['Lines with Phones', len(df[df['phones'].str.len() > 0]) if 'phones' in df.columns else 0],
+                    ['Lines with Numbers', df['has_numbers'].sum() if 'has_numbers' in df.columns else 0],
+                    ['Lines with Currency', df['has_currency'].sum() if 'has_currency' in df.columns else 0],
+                    ['Total Word Count', df['word_count'].sum() if 'word_count' in df.columns else 0]
+                ]
+                
+                summary_df = pd.DataFrame(summary_data, columns=['Metric', 'Value'])
+                summary_df.to_excel(writer, sheet_name='Summary', index=False)
+                
+                # Data types sheet
+                data_types = []
+                for col in df.columns:
+                    non_empty = df[col].astype_str().str.strip().ne('').sum()
+                    data_types.append([col, non_empty, len(df) - non_empty])
+                
+                types_df = pd.DataFrame(data_types, columns=['Column', 'Non-Empty', 'Empty'])
+                types_df.to_excel(writer, sheet_name='Data Types', index=False)
+            
+            with open(tmp_file.name, 'rb') as f:
+                excel_content = f.read()
+            os.unlink(tmp_file.name)
+
+        excel_b64 = base64.b64encode(excel_content).decode('utf-8')
+        return jsonify({
+            'excel_content': excel_b64,
+            'filename': f'pdf_data_{datetime.now().strftime("%Y%m%d")}.xlsx'
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -229,6 +385,8 @@ def api_health_check():
             'parse_multiple': '/api/parse-multiple-pdfs',
             'export_csv': '/api/export-csv',
             'export_excel': '/api/export-excel',
+            'export_pdf_data_csv': '/api/export-pdf-data-csv',
+            'export_pdf_data_excel': '/api/export-pdf-data-excel',
             'analyze': '/api/analyze'
         }
     })
@@ -242,8 +400,13 @@ def analyze_endpoint():
         if not expenses:
             return jsonify({'error': 'Brak danych do analizy'}), 400
 
-        df = parser.create_expense_dataframe(expenses)
-        summary = parser.generate_summary_report(df)
+        df = parser.create_dataframe(expenses)
+        summary = {
+            'total_rows': len(df),
+            'columns': list(df.columns),
+            'data_types': df.dtypes.to_dict(),
+            'non_empty_counts': {col: df[col].astype(str).str.strip().ne('').sum() for col in df.columns}
+        }
         return jsonify({'summary': summary, 'success': True})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
