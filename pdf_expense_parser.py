@@ -110,23 +110,20 @@ class UniversalPDFParser:
         return structured_data
 
     def _is_non_transaction_line(self, line: str) -> bool:
-        """Check if line should be skipped (headers, footers, etc.)"""
+        """Check if line should be skipped (headers, footers, etc.) - less restrictive"""
         line_upper = line.upper()
         
-        # Skip these types of lines
+        # Only skip very obvious non-transaction lines
         skip_patterns = [
-            r'^PAGE\s+\d+',  # Page numbers
-            r'^ACCOUNT\s+SUMMARY',  # Account summary headers
-            r'^BALANCE\s+FORWARD',  # Balance forward
-            r'^ENDING\s+BALANCE',   # Ending balance
-            r'^TOTAL\s+',           # Total lines
-            r'^[A-Z\s]+BANK',       # Bank name headers
-            r'^STATEMENT\s+PERIOD', # Statement period
-            r'^FROM\s+\d{1,2}/\d{1,2}/\d{4}',  # Date ranges
-            r'^TO\s+\d{1,2}/\d{1,2}/\d{4}',    # Date ranges
-            r'^[A-Z\s]+CREDIT\s+UNION',  # Credit union names
-            r'^\d{1,2}/\d{1,2}/\d{4}\s*$',  # Just a date
-            r'^[A-Z\s]+$',  # All caps text (likely headers)
+            r'^PAGE\s+\d+$',  # Just page numbers
+            r'^ACCOUNT\s+SUMMARY$',  # Account summary headers
+            r'^BALANCE\s+FORWARD$',  # Balance forward
+            r'^ENDING\s+BALANCE$',   # Ending balance
+            r'^TOTAL\s+$',           # Just "TOTAL"
+            r'^[A-Z\s]+BANK\s*$',    # Just bank names
+            r'^STATEMENT\s+PERIOD\s*$', # Statement period
+            r'^FROM\s+\d{1,2}/\d{1,2}/\d{4}\s*$',  # Just date ranges
+            r'^TO\s+\d{1,2}/\d{1,2}/\d{4}\s*$',    # Just date ranges
         ]
         
         for pattern in skip_patterns:
@@ -136,19 +133,25 @@ class UniversalPDFParser:
         return False
 
     def _looks_like_transaction(self, line: str) -> bool:
-        """Check if line looks like a transaction (has date and amount)"""
-        # Must have at least a date and some text that could be description
-        has_date = bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line))
-        has_text = len(line.split()) >= 3  # At least 3 words
+        """Check if line looks like a transaction - more permissive"""
+        # More permissive: just needs some text and either date or amount
+        has_text = len(line.split()) >= 2  # At least 2 words
         
-        # Or must have month abbreviation and amount
-        has_month = bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line, re.IGNORECASE))
+        # Check for various date formats
+        has_date = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)) or \
+                   bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
+        
+        # Check for amounts
         has_amount = bool(re.search(r'[\d,]+\.?\d*', line))
         
-        return (has_date and has_text) or (has_month and has_amount)
+        # Check for currency symbols
+        has_currency = any(symbol in line for symbol in self.currency_symbols)
+        
+        # Line is a transaction if it has text AND (date OR amount OR currency)
+        return has_text and (has_date or has_amount or has_currency)
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Parse only transaction data - clean and simple"""
+        """Parse transaction data - more flexible parsing"""
         
         # Try different transaction patterns
         transaction_patterns = [
@@ -160,6 +163,8 @@ class UniversalPDFParser:
             r'(.+?)\s+(\d{1,2}/\d{1,2}/\d{4})\s+([\d,]+\.?\d*)',
             # Pattern 4: Date Description Ref Amount
             r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([A-Z0-9]+)\s+([\d,]+\.?\d*)',
+            # Pattern 5: Month DD Description (more flexible)
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+)',
         ]
         
         for pattern in transaction_patterns:
@@ -170,7 +175,6 @@ class UniversalPDFParser:
                 if len(groups) == 3:  # Date Description Amount
                     if pattern == transaction_patterns[1]:  # Month DD Description Amount
                         month, day, description, amount = groups[0], groups[1], groups[2], groups[3]
-                        # Convert month abbreviation to date
                         date = self._convert_month_day_to_date(month, day)
                     else:
                         date, description, amount = groups
@@ -196,6 +200,23 @@ class UniversalPDFParser:
                         'line_number': line_num,
                         'full_text': line
                     }
+                
+                elif len(groups) == 3 and pattern == transaction_patterns[4]:  # Month DD Description
+                    month, day, description = groups
+                    date = self._convert_month_day_to_date(month, day)
+                    # Try to find amount in description
+                    amount_match = re.search(r'[\d,]+\.?\d*', description)
+                    amount = amount_match.group() if amount_match else '0'
+                    
+                    return {
+                        'date': date,
+                        'description': description.strip(),
+                        'amount': self._parse_amount(amount),
+                        'amount_raw': amount,
+                        'section': section,
+                        'line_number': line_num,
+                        'full_text': line
+                    }
         
         # If no pattern matches, try to extract what we can
         return self._extract_fallback_transaction(line, section, line_num)
@@ -215,24 +236,49 @@ class UniversalPDFParser:
         return f"{month_num}/{day_num}/{current_year}"
 
     def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Fallback extraction when no pattern matches"""
+        """Fallback extraction when no pattern matches - more permissive"""
         # Try to find any date and amount
-        date_match = re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)
+        date_match = re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)
+        month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})', line, re.IGNORECASE)
         amount_match = re.search(r'[\d,]+\.?\d*', line)
         
-        if date_match and amount_match:
-            date = date_match.group()
-            amount = amount_match.group()
+        # If we have any date-like pattern and some text, create a transaction
+        if (date_match or month_match) and len(line.split()) >= 2:
+            if date_match:
+                date = date_match.group()
+            elif month_match:
+                month, day = month_match.groups()
+                date = self._convert_month_day_to_date(month, day)
+            else:
+                date = ''
+            
+            amount = amount_match.group() if amount_match else '0'
             
             # Remove date and amount from line to get description
-            description = line.replace(date, '').replace(amount, '').strip()
-            description = re.sub(r'\s+', ' ', description)  # Clean up extra spaces
+            description = line
+            if date_match:
+                description = description.replace(date_match.group(), '')
+            if amount_match:
+                description = description.replace(amount_match.group(), '')
+            description = re.sub(r'\s+', ' ', description.strip())  # Clean up extra spaces
             
             return {
                 'date': date,
                 'description': description if description else 'Transaction',
                 'amount': self._parse_amount(amount),
                 'amount_raw': amount,
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        # If still no match, create a basic entry for any line with text
+        if len(line.split()) >= 2:
+            return {
+                'date': '',
+                'description': line,
+                'amount': 0,
+                'amount_raw': '',
                 'section': section,
                 'line_number': line_num,
                 'full_text': line
