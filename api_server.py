@@ -120,6 +120,10 @@ def parse_multiple_pdfs_endpoint():
             'data_types': {col: str(dtype) for col, dtype in df.dtypes.items()} if hasattr(df, "empty") and not df.empty else {}
         }
 
+        # Add export_data for consistency with single PDF endpoint
+        export_data = results[0]['structured_data'] if results and results[0].get('success') else []
+        total_rows = len(export_data)
+
         supabase_saved = False
         if SUPABASE_ENABLED:
             try:
@@ -133,7 +137,10 @@ def parse_multiple_pdfs_endpoint():
             'summary': summary,
             'total_files': len(files),
             'successful_files': len([r for r in results if r.get('success')]),
-            'supabase_saved': supabase_saved
+            'supabase_saved': supabase_saved,
+            'export_data': export_data,      # ✅ Added for consistency
+            'total_rows': total_rows,        # ✅ Added for consistency
+            'success': len([r for r in results if r.get('success')]) > 0  # ✅ Added success flag
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
