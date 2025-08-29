@@ -83,9 +83,20 @@ def parse_pdf_endpoint():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/parse-multiple-pdfs', methods=['POST'])
+@app.route('/api/parse-multiple-pdfs', methods=['POST', 'GET'])
 def parse_multiple_pdfs_endpoint():
     """Parsowanie wielu PDF (multipart/form-data, pola 'pdfs')"""
+    
+    if request.method == 'GET':
+        return jsonify({
+            'message': 'Multiple PDF Parser Endpoint',
+            'method': 'POST',
+            'description': 'Send multiple PDF files via POST request with form-data field "pdfs"',
+            'example': 'Use POST method with multipart/form-data containing multiple PDF files',
+            'note': 'This endpoint processes multiple PDFs and returns combined results'
+        })
+    
+    # POST method - actual PDF parsing
     try:
         files = request.files.getlist('pdfs')
         if not files:
