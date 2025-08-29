@@ -12,10 +12,10 @@ from pdf_expense_parser import UniversalPDFParser
 app = Flask(__name__)
 
 # --- CORS: czytane z ENV, z sensownym domyślnym zestawem ---
-# USTAW w Render: ALLOWED_ORIGINS="https://apis.dupajasia.com,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
+# USTAW w Render: ALLOWED_ORIGINS="https://apis.dupajasia.com,https://bank-statement-conve-grtt.bolt.host,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "https://apis.dupajasia.com,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
+    "https://apis.dupajasia.com,https://bank-statement-conve-grtt.bolt.host,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
 ).split(",")
 
 # Apply CORS to all routes
