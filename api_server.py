@@ -117,7 +117,7 @@ def parse_multiple_pdfs_endpoint():
         summary = {
             'total_rows': len(df) if hasattr(df, "empty") and not df.empty else 0,
             'columns': list(df.columns) if hasattr(df, "empty") and not df.empty else [],
-            'data_types': df.dtypes.to_dict() if hasattr(df, "empty") and not df.empty else {}
+            'data_types': {col: str(dtype) for col, dtype in df.dtypes.items()} if hasattr(df, "empty") and not df.empty else {}
         }
 
         supabase_saved = False
@@ -409,7 +409,7 @@ def analyze_endpoint():
         summary = {
             'total_rows': len(df),
             'columns': list(df.columns),
-            'data_types': df.dtypes.to_dict(),
+            'data_types': {col: str(dtype) for col, dtype in df.dtypes.items()},
             'non_empty_counts': {col: df[col].astype(str).str.strip().ne('').sum() for col in df.columns}
         }
         return jsonify({'summary': summary, 'success': True})
