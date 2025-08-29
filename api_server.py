@@ -113,7 +113,12 @@ def parse_multiple_pdfs_endpoint():
                         os.unlink(tmp_file.name)
 
         df = parser.create_dataframe(results[0]['structured_data'] if results else [])
-        summary = parser.generate_summary_report(df) if hasattr(df, "empty") and not df.empty else {}
+        # Generate basic summary since generate_summary_report method doesn't exist
+        summary = {
+            'total_rows': len(df) if hasattr(df, "empty") and not df.empty else 0,
+            'columns': list(df.columns) if hasattr(df, "empty") and not df.empty else [],
+            'data_types': df.dtypes.to_dict() if hasattr(df, "empty") and not df.empty else {}
+        }
 
         supabase_saved = False
         if SUPABASE_ENABLED:
