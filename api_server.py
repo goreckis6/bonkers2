@@ -62,13 +62,7 @@ def parse_pdf_endpoint():
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
             file.save(tmp_file.name)
-            print(f"🔍 Processing PDF: {file.filename}")
-            print(f"🔍 File size: {os.path.getsize(tmp_file.name)} bytes")
-            
             result = parser.parse_pdf_to_structured_data(tmp_file.name)
-            print(f"🔍 Parser result type: {type(result)}")
-            print(f"🔍 Parser result: {result}")
-            
             os.unlink(tmp_file.name)
 
         if SUPABASE_ENABLED and result.get('success'):
@@ -84,29 +78,6 @@ def parse_pdf_endpoint():
             # Add the structured data for export
             result['export_data'] = result['structured_data']
             result['total_rows'] = len(result['structured_data'])
-            
-            # Show first few rows for debugging
-            if result['structured_data']:
-                first_row = result['structured_data'][0]
-                print(f"✅ First row keys: {list(first_row.keys())}")
-                print(f"✅ First row sample: {first_row}")
-                
-                # Debug: check if data has required structure for export
-                print(f"🔍 Export data structure check:")
-                print(f"🔍 - Total rows: {len(result['structured_data'])}")
-                print(f"🔍 - First row type: {type(first_row)}")
-                print(f"🔍 - First row is dict: {isinstance(first_row, dict)}")
-                if isinstance(first_row, dict):
-                    print(f"🔍 - First row has data: {bool(first_row)}")
-                    print(f"🔍 - First row values: {list(first_row.values())[:3]}...")  # First 3 values
-        else:
-            print(f"⚠️ No structured_data in result: {result}")
-            print(f"⚠️ Result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
-        
-        # Debug: print final result structure
-        print(f"🔍 Final result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
-        print(f"🔍 Has export_data: {'export_data' in result}")
-        print(f"🔍 Has structured_data: {'structured_data' in result}")
         
         return jsonify(result)
     except Exception as e:
@@ -190,9 +161,7 @@ def export_pdf_data_csv_endpoint():
         if not pdf_data:
             return jsonify({'error': 'Brak danych PDF do eksportu'}), 400
         
-        print(f"🔍 PDF CSV export: Received {len(pdf_data)} rows")
-        if pdf_data:
-            print(f"🔍 First row keys: {list(pdf_data[0].keys()) if isinstance(pdf_data[0], dict) else 'Not a dict'}")
+
 
         # Convert to DataFrame
         try:
@@ -225,9 +194,7 @@ def export_excel_endpoint():
         if not expenses:
             return jsonify({'error': 'Brak danych do eksportu'}), 400
         
-        print(f"🔍 Excel export: Received {len(expenses)} expenses")
-        if expenses:
-            print(f"🔍 First expense keys: {list(expenses[0].keys()) if isinstance(expenses[0], dict) else 'Not a dict'}")
+
 
         # Convert to DataFrame first for universal parser
         try:
@@ -288,9 +255,7 @@ def export_pdf_data_excel_endpoint():
         if not pdf_data:
             return jsonify({'error': 'Brak danych PDF do eksportu'}), 400
         
-        print(f"🔍 PDF Excel export: Received {len(pdf_data)} rows")
-        if pdf_data:
-            print(f"🔍 First row keys: {list(pdf_data[0].keys()) if isinstance(pdf_data[0], dict) else 'Not a dict'}")
+
 
         # Convert to DataFrame
         try:
