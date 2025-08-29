@@ -90,6 +90,15 @@ def parse_pdf_endpoint():
                 first_row = result['structured_data'][0]
                 print(f"✅ First row keys: {list(first_row.keys())}")
                 print(f"✅ First row sample: {first_row}")
+                
+                # Debug: check if data has required structure for export
+                print(f"🔍 Export data structure check:")
+                print(f"🔍 - Total rows: {len(result['structured_data'])}")
+                print(f"🔍 - First row type: {type(first_row)}")
+                print(f"🔍 - First row is dict: {isinstance(first_row, dict)}")
+                if isinstance(first_row, dict):
+                    print(f"🔍 - First row has data: {bool(first_row)}")
+                    print(f"🔍 - First row values: {list(first_row.values())[:3]}...")  # First 3 values
         else:
             print(f"⚠️ No structured_data in result: {result}")
             print(f"⚠️ Result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
