@@ -62,7 +62,13 @@ def parse_pdf_endpoint():
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
             file.save(tmp_file.name)
+            print(f"🔍 Processing PDF: {file.filename}")
+            print(f"🔍 File size: {os.path.getsize(tmp_file.name)} bytes")
+            
             result = parser.parse_pdf_to_structured_data(tmp_file.name)
+            print(f"🔍 Parser result type: {type(result)}")
+            print(f"🔍 Parser result: {result}")
+            
             os.unlink(tmp_file.name)
 
         if SUPABASE_ENABLED and result.get('success'):
@@ -84,6 +90,14 @@ def parse_pdf_endpoint():
                 first_row = result['structured_data'][0]
                 print(f"✅ First row keys: {list(first_row.keys())}")
                 print(f"✅ First row sample: {first_row}")
+        else:
+            print(f"⚠️ No structured_data in result: {result}")
+            print(f"⚠️ Result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+        
+        # Debug: print final result structure
+        print(f"🔍 Final result keys: {list(result.keys()) if isinstance(result, dict) else 'Not a dict'}")
+        print(f"🔍 Has export_data: {'export_data' in result}")
+        print(f"🔍 Has structured_data: {'structured_data' in result}")
         
         return jsonify(result)
     except Exception as e:
