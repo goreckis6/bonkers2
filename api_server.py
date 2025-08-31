@@ -100,43 +100,61 @@ def parse_multiple_pdfs_endpoint():
     
     # POST method - actual PDF parsing
     try:
+        print("=== MULTIPLE PDFS ENDPOINT STARTED ===")
         files = request.files.getlist('pdfs')
+        print(f"=== RECEIVED {len(files)} FILES ===")
+        
         if not files:
             return jsonify({'error': 'Brak plików PDF'}), 400
 
         results = []
-        for f in files:
+        for i, f in enumerate(files):
             if f and f.filename.endswith('.pdf'):
+                print(f"=== PROCESSING FILE {i+1}/{len(files)}: {f.filename} ===")
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                     f.save(tmp_file.name)
+                    print(f"=== FILE SAVED TO TEMP: {tmp_file.name} ===")
                     try:
-                        results.append(parser.parse_pdf_to_structured_data(tmp_file.name))
+                        print(f"=== STARTING PARSING: {f.filename} ===")
+                        result = parser.parse_pdf_to_structured_data(tmp_file.name)
+                        print(f"=== PARSING COMPLETED: {f.filename}, Success: {result.get('success')} ===")
+                        results.append(result)
                     finally:
                         os.unlink(tmp_file.name)
+                        print(f"=== TEMP FILE DELETED: {tmp_file.name} ===")
 
+        print(f"=== PROCESSING {len(results)} RESULTS ===")
+        
         df = parser.create_dataframe(results[0]['structured_data'] if results else [])
+        print(f"=== DATAFRAME CREATED, SHAPE: {df.shape if hasattr(df, 'shape') else 'N/A'} ===")
+        
         # Generate basic summary since generate_summary_report method doesn't exist
         summary = {
             'total_rows': len(df) if hasattr(df, "empty") and not df.empty else 0,
             'columns': list(df.columns) if hasattr(df, "empty") and not df.empty else [],
             'data_types': {col: str(dtype) for col, dtype in df.dtypes.items()} if hasattr(df, "empty") and not df.empty else {}
         }
+        print(f"=== SUMMARY CREATED: {summary} ===")
 
         # Add export_data for consistency with single PDF endpoint
         export_data = results[0]['structured_data'] if results and results[0].get('success') else []
         total_rows = len(export_data)
         # Add transactions field for frontend compatibility
         transactions = export_data
+        print(f"=== EXPORT DATA PREPARED: {len(export_data)} items ===")
 
         supabase_saved = False
         if SUPABASE_ENABLED:
             try:
+                print("=== SAVING TO SUPABASE ===")
                 supabase_result = supabase_manager.save_multiple_expenses(results)
                 supabase_saved = supabase_result.get('success', False)
-            except Exception:
+                print(f"=== SUPABASE SAVE RESULT: {supabase_saved} ===")
+            except Exception as e:
+                print(f"=== SUPABASE SAVE ERROR: {e} ===")
                 supabase_saved = False
 
-        return jsonify({
+        response_data = {
             'results': results,
             'summary': summary,
             'total_files': len(files),
@@ -146,8 +164,18 @@ def parse_multiple_pdfs_endpoint():
             'total_rows': total_rows,        # ✅ Added for consistency
             'transactions': transactions,    # ✅ Added for frontend compatibility
             'success': len([r for r in results if r.get('success')]) > 0  # ✅ Added success flag
-        })
+        }
+        
+        print("=== PREPARING JSON RESPONSE ===")
+        print(f"=== RESPONSE DATA KEYS: {list(response_data.keys())} ===")
+        print("=== SENDING RESPONSE ===")
+        
+        return jsonify(response_data)
     except Exception as e:
+        print(f"=== MULTIPLE PDFS ENDPOINT ERROR: {e} ===")
+        print(f"=== ERROR TYPE: {type(e).__name__} ===")
+        import traceback
+        print(f"=== TRACEBACK: {traceback.format_exc()} ===")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/export-csv', methods=['POST'])
