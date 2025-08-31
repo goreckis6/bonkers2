@@ -152,7 +152,7 @@ const handleAPIError = (error) => {
 Set these in your Render dashboard under Environment Variables:
 
 ```
-ALLOWED_ORIGINS=https://apis.dupajasia.com,https://bank-statement-conve-grtt.bolt.host,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000
+ALLOWED_ORIGINS=https://bank-statement-conve-ywup.bolt.host,https://bank2converter.com,https://statement2sheet.com,http://localhost:3000
 ```
 
 ## Testing the Integration
