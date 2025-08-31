@@ -78,6 +78,8 @@ def parse_pdf_endpoint():
             # Add the structured data for export
             result['export_data'] = result['structured_data']
             result['total_rows'] = len(result['structured_data'])
+            # Add transactions field for frontend compatibility
+            result['transactions'] = result['structured_data']
         
         return jsonify(result)
     except Exception as e:
@@ -123,6 +125,8 @@ def parse_multiple_pdfs_endpoint():
         # Add export_data for consistency with single PDF endpoint
         export_data = results[0]['structured_data'] if results and results[0].get('success') else []
         total_rows = len(export_data)
+        # Add transactions field for frontend compatibility
+        transactions = export_data
 
         supabase_saved = False
         if SUPABASE_ENABLED:
@@ -140,6 +144,7 @@ def parse_multiple_pdfs_endpoint():
             'supabase_saved': supabase_saved,
             'export_data': export_data,      # ✅ Added for consistency
             'total_rows': total_rows,        # ✅ Added for consistency
+            'transactions': transactions,    # ✅ Added for frontend compatibility
             'success': len([r for r in results if r.get('success')]) > 0  # ✅ Added success flag
         })
     except Exception as e:
