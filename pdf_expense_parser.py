@@ -154,20 +154,16 @@ class UniversalPDFParser:
                 if parsed_line:
                     structured_data.append(parsed_line)
         
-        # Keep rows that have either a date OR an amount OR meaningful description
+        # Keep only rows that have both a date and a non-zero amount
         filtered = []
         for row in structured_data:
             date_str = str(row.get('date') or '').strip()
             amount_val = row.get('amount')
-            description = str(row.get('description') or '').strip()
-            
             try:
                 amount_num = float(amount_val) if amount_val is not None else 0.0
             except Exception:
                 amount_num = 0.0
-            
-            # Keep row if it has date OR amount OR meaningful description
-            if date_str or amount_num != 0.0 or (description and len(description) > 3):
+            if date_str and amount_num != 0.0:
                 filtered.append(row)
         
         return filtered
@@ -190,20 +186,16 @@ class UniversalPDFParser:
                 parsed_line = self._parse_transaction_only(line, current_section, line_num)
                 if parsed_line:
                     structured_data.append(parsed_line)
-        # Keep rows that have either a date OR an amount OR meaningful description
+        # Keep only rows that have both a date and a non-zero amount
         filtered: List[Dict[str, Any]] = []
         for row in structured_data:
             date_str = str(row.get('date') or '').strip()
             amount_val = row.get('amount')
-            description = str(row.get('description') or '').strip()
-            
             try:
                 amount_num = float(amount_val) if amount_val is not None else 0.0
             except Exception:
                 amount_num = 0.0
-            
-            # Keep row if it has date OR amount OR meaningful description
-            if date_str or amount_num != 0.0 or (description and len(description) > 3):
+            if date_str and amount_num != 0.0:
                 filtered.append(row)
         return filtered
 
@@ -267,33 +259,24 @@ class UniversalPDFParser:
         return False
 
     def _looks_like_transaction(self, line: str) -> bool:
-        """Check if line looks like a transaction - more inclusive filtering to catch all rows"""
+        """Check if line looks like a transaction - balanced filtering for Chase"""
         # Must have sufficient text for a real transaction
-        has_text = len(line.split()) >= 2  # Reduced from 3 to catch more rows
+        has_text = len(line.split()) >= 3  # At least 3 words (reduced from 4)
         
-        # Must have EITHER a valid date format OR amount OR transaction keywords
+        # Must have EITHER a valid date format OR Chase keywords (not both required)
         has_valid_date = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)) or \
                         bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)) or \
-                        bool(re.search(r'\d{1,2}-\d{1,2}-\d{4}', line)) or \
                         bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
         
-        # Check for amounts (decimal numbers)
-        has_amount = bool(re.search(r'[\d,]+\.?\d{2}', line))
-        
-        # Check for transaction type indicators
-        has_transaction_type = bool(re.search(r'\b(DR|CR|DEBIT|CREDIT)\b', line, re.IGNORECASE))
-        
-        # Expanded transaction keywords to include Indian bank terms
-        transaction_keywords = [
+        # Must have Chase transaction keywords
+        chase_transaction_keywords = [
             'Direct Deposit', 'ATM', 'Cash', 'Deposit', 'Withdraw', 'Card Purchase', 
             'Payment Sent', 'Square Inc', 'Recurring', 'With Pin', 'CA Card', 'Confirmation',
             'Check Deposit', 'Electronic Deposit', 'ACH', 'Credit', 'Debit', 'Purchase',
             'Transfer', 'Online', 'PMT', 'Merchant', 'Service', 'VISA', 'Mastercard',
-            'Deposit', 'Withdrawal', 'Transaction', 'Purchase', 'Payment', 'Transfer',
-            'UPI', 'NEFT', 'RTGS', 'IMPS', 'Bank', 'Payment', 'Refund', 'Fee', 'Charge',
-            'Opening Balance', 'Closing Balance', 'Balance', 'Statement'
+            'Deposit', 'Withdrawal', 'Transaction', 'Purchase', 'Payment', 'Transfer'
         ]
-        has_keywords = any(keyword.lower() in line.lower() for keyword in transaction_keywords)
+        has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_transaction_keywords)
         
         # Must NOT contain obvious garbage indicators
         obvious_garbage_indicators = [
@@ -304,8 +287,8 @@ class UniversalPDFParser:
         ]
         has_obvious_garbage = any(indicator.lower() in line.lower() for indicator in obvious_garbage_indicators)
         
-        # Line is a transaction if it has text AND (valid date OR amount OR transaction type OR keywords) AND NO obvious garbage
-        return has_text and (has_valid_date or has_amount or has_transaction_type or has_keywords) and not has_obvious_garbage
+        # Line is a transaction if it has text AND (valid date OR Chase keywords) AND NO obvious garbage
+        return has_text and (has_valid_date or has_chase_keywords) and not has_obvious_garbage
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
         """Parse transaction data - enhanced for Chase statements and Indian bank statements with improved column matching"""
@@ -507,12 +490,7 @@ class UniversalPDFParser:
                 }
         
         # If no pattern matches, try to extract what we can
-        fallback_result = self._extract_fallback_transaction(line, section, line_num)
-        if fallback_result:
-            return fallback_result
-        
-        # Last resort: try to extract any data from the line
-        return self._extract_any_data_from_line(line, section, line_num)
+        return self._extract_fallback_transaction(line, section, line_num)
 
     def _extract_amount_from_text(self, text: str) -> float:
         """Extract amount from text - prefer the LAST currency-like number on the line."""
@@ -629,7 +607,7 @@ class UniversalPDFParser:
         return f"{current_year}-{month_num}-{day_num}"
 
     def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Fallback extraction when no pattern matches - more inclusive to catch all rows"""
+        """Fallback extraction when no pattern matches - balanced filtering"""
         # Only process lines that look like real transactions
         if not self._looks_like_transaction(line):
             return None
@@ -638,11 +616,10 @@ class UniversalPDFParser:
         date_match = re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)
         month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})', line, re.IGNORECASE)
         yyyy_mm_dd_match = re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)
-        dd_mm_yyyy_match = re.search(r'\d{1,2}-\d{1,2}-\d{4}', line)
         amount_match = re.search(r'[\d,]+\.?\d*', line)
         
         # If we have any date-like pattern and some text, create a transaction
-        if (date_match or month_match or yyyy_mm_dd_match or dd_mm_yyyy_match) and len(line.split()) >= 2:
+        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 3:
             if date_match:
                 date = date_match.group()
             elif month_match:
@@ -650,8 +627,6 @@ class UniversalPDFParser:
                 date = self._convert_month_day_to_date(month, day)
             elif yyyy_mm_dd_match:
                 date = yyyy_mm_dd_match.group()
-            elif dd_mm_yyyy_match:
-                date = dd_mm_yyyy_match.group()
             else:
                 date = ''
             
@@ -666,8 +641,6 @@ class UniversalPDFParser:
                 description = description.replace(month_match.group(), '')
             elif yyyy_mm_dd_match:
                 description = description.replace(yyyy_mm_dd_match.group(), '')
-            elif dd_mm_yyyy_match:
-                description = description.replace(dd_mm_yyyy_match.group(), '')
             if amount_match:
                 description = description.replace(amount_match.group(), '')
             description = re.sub(r'\s+', ' ', description.strip())  # Clean up extra spaces
@@ -683,7 +656,7 @@ class UniversalPDFParser:
             }
         
         # If still no match but line looks promising, create a basic entry
-        if len(line.split()) >= 2 and not self._is_non_transaction_line(line):
+        if len(line.split()) >= 3 and not self._is_non_transaction_line(line):
             # Try to extract any amount from the line
             amount = self._extract_amount_from_text(line)
             
@@ -692,41 +665,6 @@ class UniversalPDFParser:
                 'description': line,
                 'amount': amount,
                 'amount_raw': str(amount),
-                'section': section,
-                'line_number': line_num,
-                'full_text': line
-            }
-        
-        return None
-
-    def _extract_any_data_from_line(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Last resort: extract any data from line to avoid missing rows"""
-        # Skip if line is too short or obviously not a transaction
-        if len(line.strip()) < 5 or self._is_non_transaction_line(line):
-            return None
-        
-        # Try to find any date
-        date_match = re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4}', line)
-        date = self._format_date(date_match.group()) if date_match else ''
-        
-        # Try to find any amount
-        amount = self._extract_amount_from_text(line)
-        
-        # Try to find transaction type
-        type_match = re.search(r'\b(DR|CR|DEBIT|CREDIT)\b', line, re.IGNORECASE)
-        trans_type = type_match.group().upper() if type_match else ''
-        
-        # Use the whole line as description if we can't parse it better
-        description = line.strip()
-        
-        # Only return if we found something meaningful
-        if date or amount != 0.0 or trans_type or len(description) > 5:
-            return {
-                'date': date,
-                'description': description,
-                'amount': amount,
-                'amount_raw': str(amount),
-                'transaction_type': trans_type,
                 'section': section,
                 'line_number': line_num,
                 'full_text': line
