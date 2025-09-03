@@ -20,7 +20,7 @@ class UniversalPDFParser:
         ]
         
         self.date_patterns = [
-            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY or MM-DD-YYYY
+            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY or MM-DD-YYYY or DD-MM-YYYY
             r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD or YYYY-MM-DD
             r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',  # DD Mon YYYY
             r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:,\s*\d{4})?',  # Mon DD[, YYYY]
@@ -39,6 +39,15 @@ class UniversalPDFParser:
             'deposits': r'DEPOSITS|ADDITIONS|CREDITS',
             'balance': r'BALANCE|ACCOUNT\s+SUMMARY|ENDING\s+BALANCE',
             'transactions': r'TRANSACTIONS|ACTIVITY|SUMMARY'
+        }
+        
+        # Indian bank statement patterns
+        self.indian_bank_patterns = {
+            'transaction_type': r'\b(DR|CR|DEBIT|CREDIT)\b',
+            'balance': r'BALANCE\s*\(INR\)|Balance\s*\(INR\)',
+            'amount': r'Amount\s*\(INR\)',
+            'transaction_particulars': r'Transaction\s+Particulars',
+            'branch_name': r'Branch\s+Name'
         }
         
         self.chase_transaction_patterns = [
@@ -282,30 +291,58 @@ class UniversalPDFParser:
         return has_text and (has_valid_date or has_chase_keywords) and not has_obvious_garbage
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Parse transaction data - enhanced for Chase statements"""
+        """Parse transaction data - enhanced for Chase statements and Indian bank statements with improved column matching"""
 
-        # Prefer generic approach: first date on the line + last amount on the line, keep full middle as description
+        # First, try tabular bank data parsing (handles better column separation)
+        tabular_result = self._parse_tabular_bank_data(line, section, line_num)
+        if tabular_result:
+            return tabular_result
+
+        # Second, try Indian bank statement format (DD-MM-YYYY Description Amount DR/CR Balance Branch)
+        indian_result = self._parse_indian_bank_transaction(line, section, line_num)
+        if indian_result:
+            return indian_result
+
+        # Enhanced approach: better date detection and amount extraction
         date_match = None
         date_patterns_generic = [
             r'\d{4}-\d{1,2}-\d{1,2}',            # YYYY-MM-DD
-            r'\d{1,2}/\d{1,2}/\d{4}',            # MM/DD/YYYY
-            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}',  # Mon DD
+            r'\d{1,2}/\d{1,2}/\d{4}',            # MM/DD/YYYY or DD/MM/YYYY
+            r'\d{1,2}-\d{1,2}-\d{4}',            # DD-MM-YYYY (Indian format)
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:\s+\d{4})?',  # Mon DD [YYYY]
             r'\b\d{1,2}/\d{1,2}\b',             # MM/DD
         ]
+        
+        # Find the first valid date match
         for pat in date_patterns_generic:
             m = re.search(pat, line, re.IGNORECASE)
             if m:
                 date_match = m
                 break
+        
+        # Enhanced amount extraction - look for the last valid currency amount
         last_amount_str = self._find_last_amount_string(line)
+        
         if date_match and last_amount_str:
             raw_date = date_match.group(0)
             parsed_date = self._format_date(raw_date)
-            description = line[:date_match.start()] + line[date_match.end():]
-            idx = description.rfind(last_amount_str)
-            if idx != -1:
-                description = description[:idx] + description[idx + len(last_amount_str):]
+            
+            # Better description extraction - remove date and amount, keep the middle
+            description = line
+            # Remove the date
+            description = description[:date_match.start()] + description[date_match.end():]
+            # Remove the amount (find it again in the modified string)
+            amount_idx = description.rfind(last_amount_str)
+            if amount_idx != -1:
+                description = description[:amount_idx] + description[amount_idx + len(last_amount_str):]
+            
+            # Clean up the description
             description = re.sub(r'\s+', ' ', description).strip()
+            
+            # Validate that we have meaningful data
+            if len(description) < 3:  # Too short description
+                description = "Transaction"
+            
             return {
                 'date': parsed_date,
                 'description': description,
@@ -465,15 +502,58 @@ class UniversalPDFParser:
         return self._parse_amount(last)
 
     def _find_last_amount_string(self, text: str) -> str:
-        """Return the last currency-like number substring from text."""
-        matches = re.findall(r'(\(?-?\$?[\d,]+(?:\.\d{2})?\)?)', text)
-        return matches[-1] if matches else ''
+        """Return the last currency-like number substring from text with improved detection."""
+        # Enhanced patterns for better currency detection
+        patterns = [
+            r'\(?-?\$?[\d,]+(?:\.\d{2})?\)?',  # Standard currency format
+            r'\(?-?[\d,]+(?:\.\d{2})?\)?',      # Numbers with parentheses for negatives
+            r'-?\$?[\d,]+(?:\.\d{2})?',         # Standard positive/negative amounts
+            r'[\d,]+(?:\.\d{2})?',              # Just numbers with commas and decimals
+        ]
+        
+        all_matches = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            all_matches.extend(matches)
+        
+        # Filter out very small numbers that are likely not amounts (like years, reference numbers)
+        valid_matches = []
+        for match in all_matches:
+            # Clean the match to get just the number
+            clean_match = re.sub(r'[^\d.,-]', '', match)
+            try:
+                # Remove commas and convert to float
+                num_value = float(clean_match.replace(',', ''))
+                # Only consider amounts that are reasonable (not years, not tiny decimals)
+                if 0.01 <= abs(num_value) <= 999999.99:
+                    valid_matches.append(match)
+            except ValueError:
+                continue
+        
+        return valid_matches[-1] if valid_matches else ''
 
     def _format_date(self, date_str: str) -> str:
-        """Format date to YYYY-MM-DD format"""
+        """Format date to YYYY-MM-DD format with improved DD-MM-YYYY support"""
         try:
-            # Handle MM/DD/YYYY format
+            # Handle DD-MM-YYYY format (Indian bank statements)
+            if re.match(r'^\d{1,2}-\d{1,2}-\d{4}$', date_str):
+                day, month, year = date_str.split('-')
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            
+            # Handle DD/MM/YYYY format
             if re.match(r'\d{1,2}/\d{1,2}/\d{4}', date_str):
+                parts = date_str.split('/')
+                # Check if it's likely DD/MM/YYYY (day > 12) or MM/DD/YYYY (month > 12)
+                if len(parts) == 3:
+                    first, second, year = parts
+                    if int(first) > 12:  # First part is day (DD/MM/YYYY)
+                        day, month = first, second
+                    else:  # First part is month (MM/DD/YYYY)
+                        month, day = first, second
+                    return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            
+            # Handle MM/DD/YYYY format (US format)
+            if re.match(r'^\d{1,2}/\d{1,2}/\d{4}$', date_str):
                 month, day, year = date_str.split('/')
                 return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
             
@@ -483,7 +563,7 @@ class UniversalPDFParser:
                 year = str(pd.Timestamp.now().year)
                 return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
 
-            # Handle MM-DD-YYYY
+            # Handle MM-DD-YYYY (US format)
             if re.match(r'^\d{1,2}-\d{1,2}-\d{4}$', date_str):
                 month, day, year = date_str.split('-')
                 return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
@@ -585,6 +665,222 @@ class UniversalPDFParser:
                 'description': line,
                 'amount': amount,
                 'amount_raw': str(amount),
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        return None
+
+    def _parse_indian_bank_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
+        """Parse Indian bank statement transaction format with improved column separation"""
+        
+        # First, try to detect if this is a tabular format by looking for multiple amounts/numbers
+        # Pattern: Date Description Amount Type Balance Branch (with proper spacing)
+        
+        # Enhanced pattern that handles various spacing and separators
+        # This pattern looks for: DD-MM-YYYY + description + amount + DR/CR + balance + branch
+        indian_pattern = r'(\d{1,2}-\d{1,2}-\d{4})\s+(.+?)\s+([\d,]+\.?\d{2})\s+(DR|CR)\s+([\d,]+\.?\d{2})\s+(.+)'
+        
+        match = re.search(indian_pattern, line)
+        if match:
+            date, description, amount, trans_type, balance, branch = match.groups()
+            
+            return {
+                'date': self._format_date(date.strip()),
+                'description': description.strip(),
+                'amount': self._parse_amount(amount),
+                'amount_raw': amount,
+                'transaction_type': trans_type.strip(),
+                'balance': self._parse_amount(balance),
+                'balance_raw': balance,
+                'branch': branch.strip(),
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        # Alternative pattern without branch
+        indian_pattern_no_branch = r'(\d{1,2}-\d{1,2}-\d{4})\s+(.+?)\s+([\d,]+\.?\d{2})\s+(DR|CR)\s+([\d,]+\.?\d{2})'
+        match = re.search(indian_pattern_no_branch, line)
+        if match:
+            date, description, amount, trans_type, balance = match.groups()
+            
+            return {
+                'date': self._format_date(date.strip()),
+                'description': description.strip(),
+                'amount': self._parse_amount(amount),
+                'amount_raw': amount,
+                'transaction_type': trans_type.strip(),
+                'balance': self._parse_amount(balance),
+                'balance_raw': balance,
+                'branch': '',
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        # If the above patterns don't work, try a more flexible approach
+        # Look for the structure: Date + Description + Amount + Type + Balance + Branch
+        # This handles cases where spacing might be irregular
+        
+        # Find date first
+        date_match = re.search(r'(\d{1,2}-\d{1,2}-\d{4})', line)
+        if not date_match:
+            return None
+        
+        date = date_match.group(1)
+        remaining_line = line[date_match.end():].strip()
+        
+        # Find all amounts in the remaining line
+        amounts = re.findall(r'([\d,]+\.?\d{2})', remaining_line)
+        if len(amounts) < 2:  # Need at least amount and balance
+            return None
+        
+        # Find transaction type (DR/CR)
+        type_match = re.search(r'\b(DR|CR)\b', remaining_line)
+        if not type_match:
+            return None
+        
+        trans_type = type_match.group(1)
+        
+        # Split the line by the transaction type to separate description from balance/branch
+        parts = remaining_line.split(trans_type, 1)
+        if len(parts) != 2:
+            return None
+        
+        description_part = parts[0].strip()
+        balance_branch_part = parts[1].strip()
+        
+        # Extract amounts from description part (should be the main transaction amount)
+        desc_amounts = re.findall(r'([\d,]+\.?\d{2})', description_part)
+        if desc_amounts:
+            amount = desc_amounts[-1]  # Take the last amount in description
+            # Remove the amount from description
+            description = description_part.replace(amount, '').strip()
+        else:
+            amount = amounts[0]  # Fallback to first amount
+            description = description_part
+        
+        # Extract balance from balance_branch_part
+        balance_amounts = re.findall(r'([\d,]+\.?\d{2})', balance_branch_part)
+        if balance_amounts:
+            balance = balance_amounts[0]  # First amount after DR/CR should be balance
+            # Remove balance from the part to get branch
+            branch = balance_branch_part.replace(balance, '').strip()
+        else:
+            balance = amounts[1] if len(amounts) > 1 else '0.00'
+            branch = balance_branch_part
+        
+        return {
+            'date': self._format_date(date.strip()),
+            'description': description.strip(),
+            'amount': self._parse_amount(amount),
+            'amount_raw': amount,
+            'transaction_type': trans_type.strip(),
+            'balance': self._parse_amount(balance),
+            'balance_raw': balance,
+            'branch': branch.strip(),
+            'section': section,
+            'line_number': line_num,
+            'full_text': line
+        }
+
+    def _parse_tabular_bank_data(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
+        """Parse tabular bank data with better column separation"""
+        
+        # Check if line contains tab-separated or fixed-width data
+        # Look for multiple amounts and DR/CR indicators
+        
+        # Split by tabs first
+        if '\t' in line:
+            parts = line.split('\t')
+            if len(parts) >= 4:  # Date, Description, Amount, Type, Balance, Branch
+                try:
+                    date = parts[0].strip()
+                    description = parts[1].strip()
+                    amount = parts[2].strip()
+                    trans_type = parts[3].strip()
+                    balance = parts[4].strip() if len(parts) > 4 else ''
+                    branch = parts[5].strip() if len(parts) > 5 else ''
+                    
+                    return {
+                        'date': self._format_date(date),
+                        'description': description,
+                        'amount': self._parse_amount(amount),
+                        'amount_raw': amount,
+                        'transaction_type': trans_type.upper(),
+                        'balance': self._parse_amount(balance),
+                        'balance_raw': balance,
+                        'branch': branch,
+                        'section': section,
+                        'line_number': line_num,
+                        'full_text': line
+                    }
+                except:
+                    pass
+        
+        # Try to parse as space-separated columns with multiple amounts
+        # Pattern: Date Description Amount Type Balance Branch
+        # Look for the structure with multiple decimal amounts
+        
+        # Find all decimal amounts in the line
+        amounts = re.findall(r'([\d,]+\.?\d{2})', line)
+        if len(amounts) >= 2:  # Need at least transaction amount and balance
+            
+            # Find date
+            date_match = re.search(r'(\d{1,2}-\d{1,2}-\d{4})', line)
+            if not date_match:
+                return None
+            
+            date = date_match.group(1)
+            
+            # Find transaction type
+            type_match = re.search(r'\b(DR|CR)\b', line)
+            if not type_match:
+                return None
+            
+            trans_type = type_match.group(1)
+            
+            # Split line by transaction type to separate parts
+            parts = line.split(trans_type, 1)
+            if len(parts) != 2:
+                return None
+            
+            before_type = parts[0].strip()
+            after_type = parts[1].strip()
+            
+            # Extract description and amount from before_type part
+            # Remove date from before_type
+            before_type_clean = before_type.replace(date, '').strip()
+            
+            # Find amount in before_type_clean
+            before_amounts = re.findall(r'([\d,]+\.?\d{2})', before_type_clean)
+            if before_amounts:
+                amount = before_amounts[-1]  # Last amount should be transaction amount
+                description = before_type_clean.replace(amount, '').strip()
+            else:
+                amount = amounts[0]
+                description = before_type_clean
+            
+            # Extract balance and branch from after_type part
+            after_amounts = re.findall(r'([\d,]+\.?\d{2})', after_type)
+            if after_amounts:
+                balance = after_amounts[0]  # First amount after type should be balance
+                branch = after_type.replace(balance, '').strip()
+            else:
+                balance = amounts[1] if len(amounts) > 1 else '0.00'
+                branch = after_type
+            
+            return {
+                'date': self._format_date(date),
+                'description': description,
+                'amount': self._parse_amount(amount),
+                'amount_raw': amount,
+                'transaction_type': trans_type.upper(),
+                'balance': self._parse_amount(balance),
+                'balance_raw': balance,
+                'branch': branch,
                 'section': section,
                 'line_number': line_num,
                 'full_text': line
@@ -737,51 +1033,159 @@ class UniversalPDFParser:
             return 0.0
 
     def create_dataframe(self, data: List[Dict[str, Any]]) -> pd.DataFrame:
-        """Create DataFrame with only essential columns: Date, Description, Amount - enhanced formatting"""
+        """Create DataFrame with only essential columns: Date, Description, Amount - enhanced formatting and validation"""
         if not data:
             return pd.DataFrame()
         
         # Convert to DataFrame
         df = pd.DataFrame(data)
         
-        # Filter only essential columns for clean output
-        essential_columns = ['date', 'description', 'amount']
+        # Filter essential columns for clean output (including new Indian bank fields)
+        essential_columns = ['date', 'description', 'amount', 'transaction_type', 'balance', 'branch']
         available_columns = [col for col in essential_columns if col in df.columns]
         
-        # Create clean DataFrame with only essential columns
+        # Create clean DataFrame with available essential columns
         clean_df = df[available_columns].copy()
         
         # Rename columns to match desired format
         column_mapping = {
             'date': 'Date',
             'description': 'Description', 
-            'amount': 'Amount'
+            'amount': 'Amount',
+            'transaction_type': 'Type',
+            'balance': 'Balance',
+            'branch': 'Branch'
         }
         
         clean_df = clean_df.rename(columns=column_mapping)
         
-        # Handle NaN values
+        # Handle NaN values and empty strings
         clean_df = clean_df.fillna('')
         
-        # Convert amount to numeric and format with commas and decimals
-        if 'Amount' in clean_df.columns:
-            clean_df['Amount'] = pd.to_numeric(clean_df['Amount'], errors='coerce').fillna(0)
-            # Format amounts with commas and 2 decimal places (e.g., 9549 -> 9,549.00)
-            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: f"{x:,.2f}" if x > 0 else "0.00")
+        # Data validation and cleaning
+        if 'Date' in clean_df.columns:
+            # Ensure dates are properly formatted strings
+            clean_df['Date'] = clean_df['Date'].astype(str)
+            # Replace empty or invalid dates
+            clean_df['Date'] = clean_df['Date'].apply(lambda x: '' if x in ['', 'nan', 'None'] else x)
         
-        # Convert to strings for export
-        for col in clean_df.columns:
-            if clean_df[col].dtype == 'object':
-                clean_df[col] = clean_df[col].astype(str)
+        if 'Description' in clean_df.columns:
+            # Clean descriptions
+            clean_df['Description'] = clean_df['Description'].astype(str)
+            clean_df['Description'] = clean_df['Description'].apply(lambda x: x.strip() if x and x != 'nan' else '')
+            # Replace empty descriptions
+            clean_df['Description'] = clean_df['Description'].apply(lambda x: 'Transaction' if not x or x == '' else x)
+        
+        if 'Amount' in clean_df.columns:
+            # Convert amount to numeric with better error handling
+            clean_df['Amount'] = pd.to_numeric(clean_df['Amount'], errors='coerce').fillna(0)
+            
+            # Validate amounts (remove obviously wrong values)
+            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: 0 if abs(x) > 999999.99 or (x != 0 and abs(x) < 0.01) else x)
+            
+            # Format amounts with commas and 2 decimal places
+            clean_df['Amount'] = clean_df['Amount'].apply(
+                lambda x: f"{x:,.2f}" if x != 0 else "0.00"
+            )
+        
+        if 'Type' in clean_df.columns:
+            # Clean transaction type (DR/CR)
+            clean_df['Type'] = clean_df['Type'].astype(str)
+            clean_df['Type'] = clean_df['Type'].apply(lambda x: x.strip().upper() if x and x != 'nan' else '')
+        
+        if 'Balance' in clean_df.columns:
+            # Convert balance to numeric and format
+            clean_df['Balance'] = pd.to_numeric(clean_df['Balance'], errors='coerce').fillna(0)
+            clean_df['Balance'] = clean_df['Balance'].apply(
+                lambda x: f"{x:,.2f}" if x != 0 else "0.00"
+            )
+        
+        if 'Branch' in clean_df.columns:
+            # Clean branch names
+            clean_df['Branch'] = clean_df['Branch'].astype(str)
+            clean_df['Branch'] = clean_df['Branch'].apply(lambda x: x.strip() if x and x != 'nan' else '')
+        
+        # Final validation: remove rows where all essential fields are empty
+        if len(clean_df) > 0:
+            # Keep rows that have at least a date or description
+            mask = (clean_df['Date'].str.strip() != '') | (clean_df['Description'].str.strip() != '')
+            clean_df = clean_df[mask].reset_index(drop=True)
         
         return clean_df
 
+    def validate_and_fix_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and fix column alignment issues in the DataFrame"""
+        if df.empty:
+            return df
+        
+        # Create a copy to work with
+        fixed_df = df.copy()
+        
+        # Check for common column misalignment issues
+        for idx, row in fixed_df.iterrows():
+            # If Date column contains non-date data, try to fix it
+            if 'Date' in fixed_df.columns:
+                date_val = str(row['Date']).strip()
+                if date_val and not re.match(r'\d{4}-\d{2}-\d{2}', date_val):
+                    # Try to extract a proper date from the description
+                    desc = str(row['Description']).strip()
+                    date_match = re.search(r'\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2}-\d{4}', desc)
+                    if date_match:
+                        fixed_df.at[idx, 'Date'] = self._format_date(date_match.group())
+                        # Remove the date from description
+                        fixed_df.at[idx, 'Description'] = desc.replace(date_match.group(), '').strip()
+            
+            # If Amount column contains non-numeric data, try to fix it
+            if 'Amount' in fixed_df.columns:
+                amount_val = str(row['Amount']).strip()
+                if amount_val and not re.match(r'[\d,]+\.?\d{2}', amount_val):
+                    # Try to extract amount from description
+                    desc = str(row['Description']).strip()
+                    amount_match = self._find_last_amount_string(desc)
+                    if amount_match:
+                        fixed_df.at[idx, 'Amount'] = f"{self._parse_amount(amount_match):,.2f}"
+                        # Remove the amount from description
+                        fixed_df.at[idx, 'Description'] = desc.replace(amount_match, '').strip()
+            
+            # If Type column is empty, try to extract DR/CR from description
+            if 'Type' in fixed_df.columns:
+                type_val = str(row['Type']).strip()
+                if not type_val or type_val == '':
+                    desc = str(row['Description']).strip()
+                    type_match = re.search(r'\b(DR|CR|DEBIT|CREDIT)\b', desc, re.IGNORECASE)
+                    if type_match:
+                        fixed_df.at[idx, 'Type'] = type_match.group().upper()
+                        # Remove the type from description
+                        fixed_df.at[idx, 'Description'] = desc.replace(type_match.group(), '').strip()
+            
+            # If Balance column is empty, try to extract balance from description
+            if 'Balance' in fixed_df.columns:
+                balance_val = str(row['Balance']).strip()
+                if not balance_val or balance_val == '0.00':
+                    desc = str(row['Description']).strip()
+                    # Look for balance pattern (large number that could be balance)
+                    balance_matches = re.findall(r'[\d,]+\.?\d{2}', desc)
+                    if balance_matches:
+                        # Take the last large number as potential balance
+                        for match in reversed(balance_matches):
+                            amount = self._parse_amount(match)
+                            if amount > 1000:  # Reasonable balance threshold
+                                fixed_df.at[idx, 'Balance'] = f"{amount:,.2f}"
+                                # Remove the balance from description
+                                fixed_df.at[idx, 'Description'] = desc.replace(match, '').strip()
+                                break
+        
+        return fixed_df
+
     def export_to_excel(self, data: List[Dict[str, Any]], filename: str = None) -> str:
-        """Export to Excel with only main data sheet - no extra sheets"""
+        """Export to Excel with only main data sheet - no extra sheets, with improved column validation"""
         df = self.create_dataframe(data)
         
         if df.empty:
             raise ValueError("No data to export")
+        
+        # Apply column validation and fixing
+        df = self.validate_and_fix_columns(df)
         
         if not filename:
             filename = f"enhanced_pdf_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"

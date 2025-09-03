@@ -192,6 +192,8 @@ def export_csv_endpoint():
             df = parser.create_dataframe(expenses)
             if df.empty:
                 return jsonify({'error': 'No data to export'}), 400
+            # Apply column validation and fixing
+            df = parser.validate_and_fix_columns(df)
         except Exception as e:
             return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
         
@@ -224,6 +226,8 @@ def export_pdf_data_csv_endpoint():
             df = parser.create_dataframe(pdf_data)
             if df.empty:
                 return jsonify({'error': 'No data to export'}), 400
+            # Apply column validation and fixing
+            df = parser.validate_and_fix_columns(df)
         except Exception as e:
             return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
         
@@ -257,6 +261,8 @@ def export_excel_endpoint():
             df = parser.create_dataframe(expenses)
             if df.empty:
                 return jsonify({'error': 'No data to export'}), 400
+            # Apply column validation and fixing
+            df = parser.validate_and_fix_columns(df)
         except Exception as e:
             return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
         
@@ -318,6 +324,8 @@ def export_pdf_data_excel_endpoint():
             df = parser.create_dataframe(pdf_data)
             if df.empty:
                 return jsonify({'error': 'No data to export'}), 400
+            # Apply column validation and fixing
+            df = parser.validate_and_fix_columns(df)
         except Exception as e:
             return jsonify({'error': f'Error creating DataFrame: {str(e)}'}), 500
         
