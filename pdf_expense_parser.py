@@ -282,30 +282,47 @@ class UniversalPDFParser:
         return has_text and (has_valid_date or has_chase_keywords) and not has_obvious_garbage
 
     def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
-        """Parse transaction data - enhanced for Chase statements"""
+        """Parse transaction data - enhanced for Chase statements with improved column matching"""
 
-        # Prefer generic approach: first date on the line + last amount on the line, keep full middle as description
+        # Enhanced approach: better date detection and amount extraction
         date_match = None
         date_patterns_generic = [
             r'\d{4}-\d{1,2}-\d{1,2}',            # YYYY-MM-DD
             r'\d{1,2}/\d{1,2}/\d{4}',            # MM/DD/YYYY
-            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}',  # Mon DD
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:\s+\d{4})?',  # Mon DD [YYYY]
             r'\b\d{1,2}/\d{1,2}\b',             # MM/DD
         ]
+        
+        # Find the first valid date match
         for pat in date_patterns_generic:
             m = re.search(pat, line, re.IGNORECASE)
             if m:
                 date_match = m
                 break
+        
+        # Enhanced amount extraction - look for the last valid currency amount
         last_amount_str = self._find_last_amount_string(line)
+        
         if date_match and last_amount_str:
             raw_date = date_match.group(0)
             parsed_date = self._format_date(raw_date)
-            description = line[:date_match.start()] + line[date_match.end():]
-            idx = description.rfind(last_amount_str)
-            if idx != -1:
-                description = description[:idx] + description[idx + len(last_amount_str):]
+            
+            # Better description extraction - remove date and amount, keep the middle
+            description = line
+            # Remove the date
+            description = description[:date_match.start()] + description[date_match.end():]
+            # Remove the amount (find it again in the modified string)
+            amount_idx = description.rfind(last_amount_str)
+            if amount_idx != -1:
+                description = description[:amount_idx] + description[amount_idx + len(last_amount_str):]
+            
+            # Clean up the description
             description = re.sub(r'\s+', ' ', description).strip()
+            
+            # Validate that we have meaningful data
+            if len(description) < 3:  # Too short description
+                description = "Transaction"
+            
             return {
                 'date': parsed_date,
                 'description': description,
@@ -465,9 +482,35 @@ class UniversalPDFParser:
         return self._parse_amount(last)
 
     def _find_last_amount_string(self, text: str) -> str:
-        """Return the last currency-like number substring from text."""
-        matches = re.findall(r'(\(?-?\$?[\d,]+(?:\.\d{2})?\)?)', text)
-        return matches[-1] if matches else ''
+        """Return the last currency-like number substring from text with improved detection."""
+        # Enhanced patterns for better currency detection
+        patterns = [
+            r'\(?-?\$?[\d,]+(?:\.\d{2})?\)?',  # Standard currency format
+            r'\(?-?[\d,]+(?:\.\d{2})?\)?',      # Numbers with parentheses for negatives
+            r'-?\$?[\d,]+(?:\.\d{2})?',         # Standard positive/negative amounts
+            r'[\d,]+(?:\.\d{2})?',              # Just numbers with commas and decimals
+        ]
+        
+        all_matches = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            all_matches.extend(matches)
+        
+        # Filter out very small numbers that are likely not amounts (like years, reference numbers)
+        valid_matches = []
+        for match in all_matches:
+            # Clean the match to get just the number
+            clean_match = re.sub(r'[^\d.,-]', '', match)
+            try:
+                # Remove commas and convert to float
+                num_value = float(clean_match.replace(',', ''))
+                # Only consider amounts that are reasonable (not years, not tiny decimals)
+                if 0.01 <= abs(num_value) <= 999999.99:
+                    valid_matches.append(match)
+            except ValueError:
+                continue
+        
+        return valid_matches[-1] if valid_matches else ''
 
     def _format_date(self, date_str: str) -> str:
         """Format date to YYYY-MM-DD format"""
@@ -737,7 +780,7 @@ class UniversalPDFParser:
             return 0.0
 
     def create_dataframe(self, data: List[Dict[str, Any]]) -> pd.DataFrame:
-        """Create DataFrame with only essential columns: Date, Description, Amount - enhanced formatting"""
+        """Create DataFrame with only essential columns: Date, Description, Amount - enhanced formatting and validation"""
         if not data:
             return pd.DataFrame()
         
@@ -760,28 +803,88 @@ class UniversalPDFParser:
         
         clean_df = clean_df.rename(columns=column_mapping)
         
-        # Handle NaN values
+        # Handle NaN values and empty strings
         clean_df = clean_df.fillna('')
         
-        # Convert amount to numeric and format with commas and decimals
-        if 'Amount' in clean_df.columns:
-            clean_df['Amount'] = pd.to_numeric(clean_df['Amount'], errors='coerce').fillna(0)
-            # Format amounts with commas and 2 decimal places (e.g., 9549 -> 9,549.00)
-            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: f"{x:,.2f}" if x > 0 else "0.00")
+        # Data validation and cleaning
+        if 'Date' in clean_df.columns:
+            # Ensure dates are properly formatted strings
+            clean_df['Date'] = clean_df['Date'].astype(str)
+            # Replace empty or invalid dates
+            clean_df['Date'] = clean_df['Date'].apply(lambda x: '' if x in ['', 'nan', 'None'] else x)
         
-        # Convert to strings for export
-        for col in clean_df.columns:
-            if clean_df[col].dtype == 'object':
-                clean_df[col] = clean_df[col].astype(str)
+        if 'Description' in clean_df.columns:
+            # Clean descriptions
+            clean_df['Description'] = clean_df['Description'].astype(str)
+            clean_df['Description'] = clean_df['Description'].apply(lambda x: x.strip() if x and x != 'nan' else '')
+            # Replace empty descriptions
+            clean_df['Description'] = clean_df['Description'].apply(lambda x: 'Transaction' if not x or x == '' else x)
+        
+        if 'Amount' in clean_df.columns:
+            # Convert amount to numeric with better error handling
+            clean_df['Amount'] = pd.to_numeric(clean_df['Amount'], errors='coerce').fillna(0)
+            
+            # Validate amounts (remove obviously wrong values)
+            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: 0 if abs(x) > 999999.99 or (x != 0 and abs(x) < 0.01) else x)
+            
+            # Format amounts with commas and 2 decimal places
+            clean_df['Amount'] = clean_df['Amount'].apply(
+                lambda x: f"{x:,.2f}" if x != 0 else "0.00"
+            )
+        
+        # Final validation: remove rows where all essential fields are empty
+        if len(clean_df) > 0:
+            # Keep rows that have at least a date or description
+            mask = (clean_df['Date'].str.strip() != '') | (clean_df['Description'].str.strip() != '')
+            clean_df = clean_df[mask].reset_index(drop=True)
         
         return clean_df
 
+    def validate_and_fix_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Validate and fix column alignment issues in the DataFrame"""
+        if df.empty:
+            return df
+        
+        # Create a copy to work with
+        fixed_df = df.copy()
+        
+        # Check for common column misalignment issues
+        for idx, row in fixed_df.iterrows():
+            # If Date column contains non-date data, try to fix it
+            if 'Date' in fixed_df.columns:
+                date_val = str(row['Date']).strip()
+                if date_val and not re.match(r'\d{4}-\d{2}-\d{2}', date_val):
+                    # Try to extract a proper date from the description
+                    desc = str(row['Description']).strip()
+                    date_match = re.search(r'\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{1,2}-\d{1,2}', desc)
+                    if date_match:
+                        fixed_df.at[idx, 'Date'] = self._format_date(date_match.group())
+                        # Remove the date from description
+                        fixed_df.at[idx, 'Description'] = desc.replace(date_match.group(), '').strip()
+            
+            # If Amount column contains non-numeric data, try to fix it
+            if 'Amount' in fixed_df.columns:
+                amount_val = str(row['Amount']).strip()
+                if amount_val and not re.match(r'[\d,]+\.?\d{2}', amount_val):
+                    # Try to extract amount from description
+                    desc = str(row['Description']).strip()
+                    amount_match = self._find_last_amount_string(desc)
+                    if amount_match:
+                        fixed_df.at[idx, 'Amount'] = f"{self._parse_amount(amount_match):,.2f}"
+                        # Remove the amount from description
+                        fixed_df.at[idx, 'Description'] = desc.replace(amount_match, '').strip()
+        
+        return fixed_df
+
     def export_to_excel(self, data: List[Dict[str, Any]], filename: str = None) -> str:
-        """Export to Excel with only main data sheet - no extra sheets"""
+        """Export to Excel with only main data sheet - no extra sheets, with improved column validation"""
         df = self.create_dataframe(data)
         
         if df.empty:
             raise ValueError("No data to export")
+        
+        # Apply column validation and fixing
+        df = self.validate_and_fix_columns(df)
         
         if not filename:
             filename = f"enhanced_pdf_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
