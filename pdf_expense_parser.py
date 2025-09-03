@@ -5,6 +5,10 @@ import PyPDF2
 import re
 import pandas as pd
 from typing import List, Dict, Any, Optional
+try:
+    import pdfplumber  # Layout-aware PDF text extraction
+except Exception:
+    pdfplumber = None
 
 class UniversalPDFParser:
     def __init__(self):
@@ -16,9 +20,14 @@ class UniversalPDFParser:
         ]
         
         self.date_patterns = [
-            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY
-            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD
-            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',  # DD MMM YYYY
+            r'\d{1,2}[/-]\d{1,2}[/-]\d{4}',  # MM/DD/YYYY or MM-DD-YYYY
+            r'\d{4}[/-]\d{1,2}[/-]\d{1,2}',  # YYYY/MM/DD or YYYY-MM-DD
+            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}',  # DD Mon YYYY
+            r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:,\s*\d{4})?',  # Mon DD[, YYYY]
+            r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*\d{4})?',  # Month DD[, YYYY]
+            r'\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)(?:\s*,?\s*\d{4})?',  # DD Month [YYYY]
+            r'\b\d{1,2}/\d{1,2}\b',  # MM/DD without year
+            r'\b\d{1,2}-\d{1,2}\b',  # MM-DD without year
         ]
         
         self.email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
@@ -56,39 +65,71 @@ class UniversalPDFParser:
             print(f"Error extracting text from PDF: {e}")
             return ""
 
+    def extract_lines_with_layout(self, pdf_path: str) -> List[str]:
+        """Extract lines using pdfplumber to preserve layout and line integrity."""
+        if pdfplumber is None:
+            return []
+        lines: List[str] = []
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    # Tight tolerances to keep columns separate but join words on the same line
+                    text = page.extract_text(x_tolerance=1, y_tolerance=3) or ''
+                    if not text:
+                        continue
+                    for raw_line in text.split('\n'):
+                        line = (raw_line or '').strip()
+                        if line:
+                            lines.append(line)
+        except Exception as e:
+            print(f"Error extracting layout lines: {e}")
+        return lines
+
     def parse_pdf_to_structured_data(self, pdf_path: str) -> Dict[str, Any]:
         """Parse PDF and return structured data with enhanced banking support"""
         try:
-            text = self.extract_text_from_pdf(pdf_path)
-            if not text.strip():
-                return {'success': False, 'error': 'No text extracted from PDF'}
+            # 1) Try layout-aware extraction first for best "line = Date Description Amount"
+            structured_data: List[Dict[str, Any]] = []
+            text: str = ""
+            layout_lines = self.extract_lines_with_layout(pdf_path)
+            if layout_lines:
+                structured_data = self._extract_from_lines_with_layout(layout_lines)
             
-            # Enhanced parsing for banking documents
-            structured_data = self._extract_structured_data_enhanced(text)
+            # 2) Fallback to simple text extraction if needed
+            if not structured_data:
+                text = self.extract_text_from_pdf(pdf_path)
+                if not text.strip():
+                    return {'success': False, 'error': 'No text extracted from PDF'}
+                structured_data = self._extract_structured_data_enhanced(text)
             
             if not structured_data:
                 return {'success': False, 'error': 'No structured data found'}
             
+            # Compute text length from whichever source we used
+            text_source = text if text else "\n".join(layout_lines)
             return {
                 'success': True,
                 'structured_data': structured_data,
                 'total_lines': len(structured_data),
-                'text_length': len(text)
+                'text_length': len(text_source)
             }
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
     def _extract_structured_data_enhanced(self, text: str) -> List[Dict[str, Any]]:
-        """Enhanced extraction with banking section recognition"""
+        """Enhanced extraction with banking section recognition - focused on transactions only"""
         lines = text.split('\n')
         structured_data = []
         current_section = 'general'
-        section_data = []
         
         for line_num, line in enumerate(lines):
             line = line.strip()
             if not line:
+                continue
+            
+            # Skip header lines, footers, and non-transaction content
+            if self._is_non_transaction_line(line):
                 continue
             
             # Detect banking sections
@@ -98,14 +139,458 @@ class UniversalPDFParser:
                 print(f"🔍 Detected section: {current_section}")
                 continue
             
-            # Parse line based on current section
-            parsed_line = self._parse_line_by_section(line, current_section, line_num)
-            if parsed_line:
-                parsed_line['section'] = current_section
-                parsed_line['line_number'] = line_num
-                structured_data.append(parsed_line)
+            # Only process lines that look like transactions
+            if self._looks_like_transaction(line):
+                parsed_line = self._parse_transaction_only(line, current_section, line_num)
+                if parsed_line:
+                    structured_data.append(parsed_line)
         
-        return structured_data
+        # Keep only rows that have both a date and a non-zero amount
+        filtered = []
+        for row in structured_data:
+            date_str = str(row.get('date') or '').strip()
+            amount_val = row.get('amount')
+            try:
+                amount_num = float(amount_val) if amount_val is not None else 0.0
+            except Exception:
+                amount_num = 0.0
+            if date_str and amount_num != 0.0:
+                filtered.append(row)
+        
+        return filtered
+
+    def _extract_from_lines_with_layout(self, lines: List[str]) -> List[Dict[str, Any]]:
+        """Parse already line-broken text (layout-aware) into structured transactions only."""
+        structured_data: List[Dict[str, Any]] = []
+        current_section = 'general'
+        for line_num, raw_line in enumerate(lines):
+            line = (raw_line or '').strip()
+            if not line:
+                continue
+            if self._is_non_transaction_line(line):
+                continue
+            detected_section = self._detect_banking_section(line)
+            if detected_section:
+                current_section = detected_section
+                continue
+            if self._looks_like_transaction(line):
+                parsed_line = self._parse_transaction_only(line, current_section, line_num)
+                if parsed_line:
+                    structured_data.append(parsed_line)
+        # Keep only rows that have both a date and a non-zero amount
+        filtered: List[Dict[str, Any]] = []
+        for row in structured_data:
+            date_str = str(row.get('date') or '').strip()
+            amount_val = row.get('amount')
+            try:
+                amount_num = float(amount_val) if amount_val is not None else 0.0
+            except Exception:
+                amount_num = 0.0
+            if date_str and amount_num != 0.0:
+                filtered.append(row)
+        return filtered
+
+    def _is_non_transaction_line(self, line: str) -> bool:
+        """Check if line should be skipped - comprehensive filtering for Chase statements"""
+        line_upper = line.upper()
+        
+        # Skip these types of lines - comprehensive filtering
+        skip_patterns = [
+            # Page and document info
+            r'^PAGE\s+\d+$',  # Page numbers
+            r'^ACCOUNT\s+SUMMARY$',  # Account summary headers
+            r'^BALANCE\s+FORWARD$',  # Balance forward
+            r'^ENDING\s+BALANCE$',   # Ending balance
+            r'^TOTAL\s+$',           # Just "TOTAL"
+            r'^[A-Z\s]+BANK\s*$',    # Just bank names
+            r'^STATEMENT\s+PERIOD\s*$', # Statement period
+            r'^FROM\s+\d{1,2}/\d{1,2}/\d{4}\s*$',  # Just date ranges
+            r'^TO\s+\d{1,2}/\d{1,2}/\d{4}\s*$',    # Just date ranges
+            
+            # Address and contact info
+            r'^P\s+O\s+BOX\s+\d+',  # P O Box addresses
+            r'^\d+\s+[A-Z\s]+\s+[A-Z\s]+\s+[A-Z]{2}\s+\d{5}',  # Street addresses
+            r'^[A-Z\s]+\,\s+[A-Z]{2}\s+\d{5}',  # City, State ZIP
+            r'^1-\d{3}-\d{3}-\d{4}',  # Phone numbers
+            r'^DEAL\s+AND\s+HARD\s+OF\s+HEARING',  # Accessibility info
+            r'^PARA\s+ESPANOL',  # Spanish info
+            r'^INTERNATIONAL\s+CALLS',  # International calls
+            
+            # Account and routing info
+            r'^\d{9,12}',  # Long account numbers
+            r'^[A-Z]{2}\s+\d{3}\s+\d{3}',  # Routing numbers
+            r'^NNNNNNNNNNN',  # Placeholder numbers
+            r'^T\s+\d+\s+\d+',  # Transaction codes
+            
+            # Terms and conditions
+            r'^CONGRATULATIONS',  # Congratulations messages
+            r'^THANKS\s+TO\s+YOUR',  # Thank you messages
+            r'^WE\s+WAIVED',  # Fee waiver messages
+            r'^MONTHLY\s+SERVICE\s+FEE',  # Fee information
+            r'^BASED\s+ON\s+AGGREGATED',  # Terms
+            r'^BUSINESS\s+COMPLETE\s+CHECKING',  # Account types
+            r'^CUTOFF\s+TIME',  # Cutoff information
+            r'^MINIMUM\s+DAILY\s+BALANCE',  # Balance requirements
+            r'^EASTERN\s+TIME',  # Time zone info
+            
+            # Empty or very short lines
+            r'^\s*$',  # Empty lines
+            r'^[A-Z\s]{1,3}$',  # Very short all caps
+            
+            # Additional garbage patterns
+            r'^\d{5,}$',  # Just numbers (5+ digits)
+            r'^[A-Z\s]{20,}$',  # Very long all caps text
+            r'^[A-Z\s]+\d{5,}',  # Text followed by many numbers
+        ]
+        
+        for pattern in skip_patterns:
+            if re.search(pattern, line_upper, re.IGNORECASE):
+                return True
+        
+        return False
+
+    def _looks_like_transaction(self, line: str) -> bool:
+        """Check if line looks like a transaction - balanced filtering for Chase"""
+        # Must have sufficient text for a real transaction
+        has_text = len(line.split()) >= 3  # At least 3 words (reduced from 4)
+        
+        # Must have EITHER a valid date format OR Chase keywords (not both required)
+        has_valid_date = bool(re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)) or \
+                        bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line)) or \
+                        bool(re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}', line, re.IGNORECASE))
+        
+        # Must have Chase transaction keywords
+        chase_transaction_keywords = [
+            'Direct Deposit', 'ATM', 'Cash', 'Deposit', 'Withdraw', 'Card Purchase', 
+            'Payment Sent', 'Square Inc', 'Recurring', 'With Pin', 'CA Card', 'Confirmation',
+            'Check Deposit', 'Electronic Deposit', 'ACH', 'Credit', 'Debit', 'Purchase',
+            'Transfer', 'Online', 'PMT', 'Merchant', 'Service', 'VISA', 'Mastercard',
+            'Deposit', 'Withdrawal', 'Transaction', 'Purchase', 'Payment', 'Transfer'
+        ]
+        has_chase_keywords = any(keyword.lower() in line.lower() for keyword in chase_transaction_keywords)
+        
+        # Must NOT contain obvious garbage indicators
+        obvious_garbage_indicators = [
+            'P O Box', 'Columbus OH', 'Deal and Hard', 'Para Espanol', 'International Calls',
+            'Congratulations', 'thanks to your', 'waived', 'monthly service fee', 'cutoff time',
+            'Eastern Time', 'Minimum Daily Balance', 'Business Complete', 'aggregated spending',
+            'NNNNNNNNNNN', 'T 1 000000000', 'DRE 021 142 30321'
+        ]
+        has_obvious_garbage = any(indicator.lower() in line.lower() for indicator in obvious_garbage_indicators)
+        
+        # Line is a transaction if it has text AND (valid date OR Chase keywords) AND NO obvious garbage
+        return has_text and (has_valid_date or has_chase_keywords) and not has_obvious_garbage
+
+    def _parse_transaction_only(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
+        """Parse transaction data - enhanced for Chase statements"""
+
+        # Prefer generic approach: first date on the line + last amount on the line, keep full middle as description
+        date_match = None
+        date_patterns_generic = [
+            r'\d{4}-\d{1,2}-\d{1,2}',            # YYYY-MM-DD
+            r'\d{1,2}/\d{1,2}/\d{4}',            # MM/DD/YYYY
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}',  # Mon DD
+            r'\b\d{1,2}/\d{1,2}\b',             # MM/DD
+        ]
+        for pat in date_patterns_generic:
+            m = re.search(pat, line, re.IGNORECASE)
+            if m:
+                date_match = m
+                break
+        last_amount_str = self._find_last_amount_string(line)
+        if date_match and last_amount_str:
+            raw_date = date_match.group(0)
+            parsed_date = self._format_date(raw_date)
+            description = line[:date_match.start()] + line[date_match.end():]
+            idx = description.rfind(last_amount_str)
+            if idx != -1:
+                description = description[:idx] + description[idx + len(last_amount_str):]
+            description = re.sub(r'\s+', ' ', description).strip()
+            return {
+                'date': parsed_date,
+                'description': description,
+                'amount': self._parse_amount(last_amount_str),
+                'amount_raw': last_amount_str,
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+
+        # Enhanced transaction patterns for Chase
+        transaction_patterns = [
+            # 0: MM/DD/YYYY Description Amount
+            r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([\d,]+\.?\d*)',
+            # 1: Month DD Description Amount (Feb 17 ATM Cash Deposit... 9549.00)
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+?)\s+([\d,]+\.?\d*)',
+            # 2: Description Date Amount
+            r'(.+?)\s+(\d{1,2}/\d{1,2}/\d{4})\s+([\d,]+\.?\d*)',
+            # 3: Date Description Ref Amount
+            r'(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+([A-Z0-9]+)\s+([\d,]+\.?\d*)',
+            # 4: Month DD Description (more flexible)
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+)',
+            # 5: Month DD Description Amount (without spaces)
+            r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\s+(.+?)([\d,]+\.?\d*)',
+            # 6: YYYY-MM-DD Description (new format)
+            r'(\d{4}-\d{1,2}-\d{1,2})\s+(.+)',
+            # 7: Description YYYY-MM-DD (reversed)
+            r'(.+?)\s+(\d{4}-\d{1,2}-\d{1,2})',
+            # 8: MM/DD Description Amount (no year)
+            r'(\d{1,2}/\d{1,2})\s+(.+?)\s+([\d,]+\.?\d*)',
+        ]
+        
+        for idx, pattern in enumerate(transaction_patterns):
+            match = re.search(pattern, line, re.IGNORECASE)
+            if not match:
+                continue
+            groups = match.groups()
+            
+            if idx == 0:  # MM/DD/YYYY Description Amount
+                date, description, amount = groups
+                parsed_date = self._format_date(date.strip())
+                return {
+                    'date': parsed_date,
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 1:  # Month DD Description Amount
+                month, day, description, amount = groups
+                date = self._convert_month_day_to_date(month, day)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 2:  # Description Date Amount
+                description, date, amount = groups
+                return {
+                    'date': self._format_date(date.strip()),
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 3:  # Date Description Ref Amount
+                date, description, ref, amount = groups
+                return {
+                    'date': self._format_date(date.strip()),
+                    'description': f"{description.strip()} (Ref: {ref.strip()})",
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 4:  # Month DD Description (find amount later)
+                month, day, description = groups
+                date = self._convert_month_day_to_date(month, day)
+                amount = self._extract_amount_from_text(description)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': amount,
+                    'amount_raw': str(amount),
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 5:  # Month DD Description Amount (tight)
+                month, day, description, amount = groups
+                date = self._convert_month_day_to_date(month, day)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 6:  # YYYY-MM-DD Description
+                date, description = groups
+                amount = self._extract_amount_from_text(description)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': amount,
+                    'amount_raw': str(amount),
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 7:  # Description YYYY-MM-DD
+                description, date = groups
+                amount = self._extract_amount_from_text(description)
+                return {
+                    'date': self._format_date(date),
+                    'description': description.strip(),
+                    'amount': amount,
+                    'amount_raw': str(amount),
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+            if idx == 8:  # MM/DD Description Amount (no year)
+                mmdd, description, amount = groups
+                date = self._format_date(mmdd)
+                return {
+                    'date': date,
+                    'description': description.strip(),
+                    'amount': self._parse_amount(amount),
+                    'amount_raw': amount,
+                    'section': section,
+                    'line_number': line_num,
+                    'full_text': line
+                }
+        
+        # If no pattern matches, try to extract what we can
+        return self._extract_fallback_transaction(line, section, line_num)
+
+    def _extract_amount_from_text(self, text: str) -> float:
+        """Extract amount from text - prefer the LAST currency-like number on the line."""
+        # Match currency-like numbers including optional $ and parentheses for negatives
+        matches = re.findall(r'(\(?-?\$?[\d,]+(?:\.\d{2})?\)?)', text)
+        if not matches:
+            return 0.0
+        last = matches[-1]
+        return self._parse_amount(last)
+
+    def _find_last_amount_string(self, text: str) -> str:
+        """Return the last currency-like number substring from text."""
+        matches = re.findall(r'(\(?-?\$?[\d,]+(?:\.\d{2})?\)?)', text)
+        return matches[-1] if matches else ''
+
+    def _format_date(self, date_str: str) -> str:
+        """Format date to YYYY-MM-DD format"""
+        try:
+            # Handle MM/DD/YYYY format
+            if re.match(r'\d{1,2}/\d{1,2}/\d{4}', date_str):
+                month, day, year = date_str.split('/')
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            
+            # Handle MM/DD without year -> assume current year
+            if re.match(r'^\d{1,2}/\d{1,2}$', date_str):
+                month, day = date_str.split('/')
+                year = str(pd.Timestamp.now().year)
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+            # Handle MM-DD-YYYY
+            if re.match(r'^\d{1,2}-\d{1,2}-\d{4}$', date_str):
+                month, day, year = date_str.split('-')
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+
+            # Handle MM-DD without year -> assume current year
+            if re.match(r'^\d{1,2}-\d{1,2}$', date_str):
+                month, day = date_str.split('-')
+                year = str(pd.Timestamp.now().year)
+                return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            
+            # Handle YYYY-MM-DD format (already correct)
+            elif re.match(r'\d{4}-\d{1,2}-\d{1,2}', date_str):
+                return date_str
+            
+            # Handle other formats - try to parse
+            else:
+                # Normalize month names (short/full) and remove commas
+                normalized = re.sub(r',', '', date_str).strip()
+                # Try pandas to_datetime for various formats
+                parsed_date = pd.to_datetime(normalized, errors='coerce')
+                if pd.notna(parsed_date):
+                    return parsed_date.strftime('%Y-%m-%d')
+                
+        except Exception as e:
+            print(f"Error formatting date {date_str}: {e}")
+        
+        return date_str
+
+    def _convert_month_day_to_date(self, month: str, day: str) -> str:
+        """Convert month abbreviation and day to YYYY-MM-DD format"""
+        month_map = {
+            'Jan': '01', 'Feb': '02', 'Mar': '03', 'Apr': '04',
+            'May': '05', 'Jun': '06', 'Jul': '07', 'Aug': '08',
+            'Sep': '09', 'Oct': '10', 'Nov': '11', 'Dec': '12'
+        }
+        
+        current_year = pd.Timestamp.now().year
+        month_num = month_map.get(month, '01')
+        day_num = day.zfill(2)
+        
+        return f"{current_year}-{month_num}-{day_num}"
+
+    def _extract_fallback_transaction(self, line: str, section: str, line_num: int) -> Optional[Dict[str, Any]]:
+        """Fallback extraction when no pattern matches - balanced filtering"""
+        # Only process lines that look like real transactions
+        if not self._looks_like_transaction(line):
+            return None
+            
+        # Try to find any date and amount - enhanced date detection
+        date_match = re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{4}', line)
+        month_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})', line, re.IGNORECASE)
+        yyyy_mm_dd_match = re.search(r'\d{4}-\d{1,2}-\d{1,2}', line)
+        amount_match = re.search(r'[\d,]+\.?\d*', line)
+        
+        # If we have any date-like pattern and some text, create a transaction
+        if (date_match or month_match or yyyy_mm_dd_match) and len(line.split()) >= 3:
+            if date_match:
+                date = date_match.group()
+            elif month_match:
+                month, day = month_match.groups()
+                date = self._convert_month_day_to_date(month, day)
+            elif yyyy_mm_dd_match:
+                date = yyyy_mm_dd_match.group()
+            else:
+                date = ''
+            
+            # Improved amount extraction
+            amount = self._extract_amount_from_text(line) if not amount_match else self._parse_amount(amount_match.group())
+            
+            # Remove date and amount from line to get description
+            description = line
+            if date_match:
+                description = description.replace(date_match.group(), '')
+            elif month_match:
+                description = description.replace(month_match.group(), '')
+            elif yyyy_mm_dd_match:
+                description = description.replace(yyyy_mm_dd_match.group(), '')
+            if amount_match:
+                description = description.replace(amount_match.group(), '')
+            description = re.sub(r'\s+', ' ', description.strip())  # Clean up extra spaces
+            
+            return {
+                'date': self._format_date(date),
+                'description': description if description else 'Transaction',
+                'amount': amount,
+                'amount_raw': str(amount),
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        # If still no match but line looks promising, create a basic entry
+        if len(line.split()) >= 3 and not self._is_non_transaction_line(line):
+            # Try to extract any amount from the line
+            amount = self._extract_amount_from_text(line)
+            
+            return {
+                'date': '',
+                'description': line,
+                'amount': amount,
+                'amount_raw': str(amount),
+                'section': section,
+                'line_number': line_num,
+                'full_text': line
+            }
+        
+        return None
 
     def _detect_banking_section(self, line: str) -> Optional[str]:
         """Detect banking document sections"""
@@ -127,7 +612,7 @@ class UniversalPDFParser:
             return self._parse_general_line(line, line_num)
 
     def _parse_transaction_line(self, line: str, section: str) -> Optional[Dict[str, Any]]:
-        """Parse transaction lines (withdrawals/deposits)"""
+        """Parse transaction lines (withdrawals/deposits) - improved amount extraction"""
         for pattern in self.chase_transaction_patterns:
             match = re.search(pattern, line)
             if match:
@@ -137,7 +622,7 @@ class UniversalPDFParser:
                     date, description, amount = groups
                     return {
                         'transaction_type': section,
-                        'date': date.strip(),
+                        'date': self._format_date(date.strip()),
                         'description': description.strip(),
                         'amount': self._parse_amount(amount),
                         'amount_raw': amount,
@@ -151,8 +636,8 @@ class UniversalPDFParser:
                     date, description, ref, amount = groups
                     return {
                         'transaction_type': section,
-                        'date': date.strip(),
-                        'description': description.strip(),
+                        'date': self._format_date(date.strip()),
+                        'description': f"{description.strip()} (Ref: {ref.strip()})",
                         'amount': self._parse_amount(amount),
                         'amount_raw': amount,
                         'ref_number': ref.strip(),
@@ -235,32 +720,64 @@ class UniversalPDFParser:
     def _parse_amount(self, amount_str: str) -> float:
         """Parse amount string to float"""
         try:
-            # Remove currency symbols and commas
-            cleaned = re.sub(r'[^\d.-]', '', amount_str)
-            return float(cleaned) if cleaned else 0.0
+            s = amount_str.strip()
+            # Parentheses mean negative
+            is_negative = s.startswith('(') and s.endswith(')')
+            # Remove everything except digits, comma, dot, minus
+            cleaned = re.sub(r'[^\d.,-]', '', s)
+            # Remove thousands separators
+            cleaned = cleaned.replace(',', '')
+            if cleaned.count('-') > 1:
+                cleaned = cleaned.replace('-', '', cleaned.count('-') - 1)
+            value = float(cleaned) if cleaned else 0.0
+            if is_negative and value > 0:
+                value = -value
+            return value
         except:
             return 0.0
 
     def create_dataframe(self, data: List[Dict[str, Any]]) -> pd.DataFrame:
-        """Create DataFrame with enhanced banking columns"""
+        """Create DataFrame with only essential columns: Date, Description, Amount - enhanced formatting"""
         if not data:
             return pd.DataFrame()
         
         # Convert to DataFrame
         df = pd.DataFrame(data)
         
+        # Filter only essential columns for clean output
+        essential_columns = ['date', 'description', 'amount']
+        available_columns = [col for col in essential_columns if col in df.columns]
+        
+        # Create clean DataFrame with only essential columns
+        clean_df = df[available_columns].copy()
+        
+        # Rename columns to match desired format
+        column_mapping = {
+            'date': 'Date',
+            'description': 'Description', 
+            'amount': 'Amount'
+        }
+        
+        clean_df = clean_df.rename(columns=column_mapping)
+        
         # Handle NaN values
-        df = df.fillna('')
+        clean_df = clean_df.fillna('')
         
-        # Convert lists to strings for export
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].astype(str)
+        # Convert amount to numeric and format with commas and decimals
+        if 'Amount' in clean_df.columns:
+            clean_df['Amount'] = pd.to_numeric(clean_df['Amount'], errors='coerce').fillna(0)
+            # Format amounts with commas and 2 decimal places (e.g., 9549 -> 9,549.00)
+            clean_df['Amount'] = clean_df['Amount'].apply(lambda x: f"{x:,.2f}" if x > 0 else "0.00")
         
-        return df
+        # Convert to strings for export
+        for col in clean_df.columns:
+            if clean_df[col].dtype == 'object':
+                clean_df[col] = clean_df[col].astype(str)
+        
+        return clean_df
 
     def export_to_excel(self, data: List[Dict[str, Any]], filename: str = None) -> str:
-        """Export to Excel with enhanced banking sheets"""
+        """Export to Excel with only main data sheet - no extra sheets"""
         df = self.create_dataframe(data)
         
         if df.empty:
@@ -270,14 +787,8 @@ class UniversalPDFParser:
             filename = f"enhanced_pdf_data_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            # Main data sheet
+            # Only main data sheet - no extra sheets
             df.to_excel(writer, sheet_name='Extracted Data', index=False)
-            
-            # Banking summary sheet
-            self._create_banking_summary_sheet(writer, df)
-            
-            # Data types sheet
-            self._create_data_types_sheet(writer, df)
         
         return filename
 
@@ -344,25 +855,24 @@ class UniversalPDFParser:
         return filename
 
 def main():
-    """Example usage"""
+    """Test the parser"""
     parser = UniversalPDFParser()
     
-    # Test with a PDF file
-    pdf_file = 'test.pdf'  # Replace with your PDF path
+    # Test with a sample PDF
+    pdf_path = "test.pdf"  # Replace with actual PDF path
     
     try:
-        print("🚀 Starting universal PDF parsing...")
-        
-        # Parse PDF to structured data
-        result = parser.parse_pdf_to_structured_data(pdf_file)
+        result = parser.parse_pdf_to_structured_data(pdf_path)
         
         if result['success']:
             print(f"✅ Successfully parsed {result['total_lines']} lines")
             
             # Export to Excel and CSV
-            parser.export_to_excel(result['structured_data'], 'extracted_data.xlsx')
-            parser.export_to_csv(result['structured_data'], 'extracted_data.csv')
+            excel_file = parser.export_to_excel(result['structured_data'])
+            csv_file = parser.export_to_csv(result['structured_data'])
             
+            print(f"✅ Excel exported: {excel_file}")
+            print(f"✅ CSV exported: {csv_file}")
         else:
             print(f"❌ Error: {result['error']}")
             

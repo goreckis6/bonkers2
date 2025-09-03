@@ -12,10 +12,10 @@ from pdf_expense_parser import UniversalPDFParser
 app = Flask(__name__)
 
 # --- CORS: czytane z ENV, z sensownym domyślnym zestawem ---
-# USTAW w Render: ALLOWED_ORIGINS="https://apis.dupajasia.com,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
+# USTAW w Render: ALLOWED_ORIGINS="https://bank-statement-conve-ywup.bolt.host,https://statement2sheet.com,http://localhost:3000"
 ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS",
-    "https://apis.dupajasia.com,https://pdf-to-excel-csv-con-226z.bolt.host,http://localhost:3000"
+    "https://bank-statement-conve-ywup.bolt.host,https://statement2sheet.com,http://localhost:3000"
 ).split(",")
 
 # Apply CORS to all routes
@@ -78,54 +78,104 @@ def parse_pdf_endpoint():
             # Add the structured data for export
             result['export_data'] = result['structured_data']
             result['total_rows'] = len(result['structured_data'])
-            
-            # Show first few rows for debugging
-            if result['structured_data']:
-                first_row = result['structured_data'][0]
-                print(f"✅ First row keys: {list(first_row.keys())}")
-                print(f"✅ First row sample: {first_row}")
+            # Add transactions field for frontend compatibility
+            result['transactions'] = result['structured_data']
         
         return jsonify(result)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/parse-multiple-pdfs', methods=['POST'])
+@app.route('/api/parse-multiple-pdfs', methods=['POST', 'GET'])
 def parse_multiple_pdfs_endpoint():
     """Parsowanie wielu PDF (multipart/form-data, pola 'pdfs')"""
+    
+    if request.method == 'GET':
+        return jsonify({
+            'message': 'Multiple PDF Parser Endpoint',
+            'method': 'POST',
+            'description': 'Send multiple PDF files via POST request with form-data field "pdfs"',
+            'example': 'Use POST method with multipart/form-data containing multiple PDF files',
+            'note': 'This endpoint processes multiple PDFs and returns combined results'
+        })
+    
+    # POST method - actual PDF parsing
     try:
+        print("=== MULTIPLE PDFS ENDPOINT STARTED ===")
         files = request.files.getlist('pdfs')
+        print(f"=== RECEIVED {len(files)} FILES ===")
+        
         if not files:
             return jsonify({'error': 'Brak plików PDF'}), 400
 
         results = []
-        for f in files:
+        for i, f in enumerate(files):
             if f and f.filename.endswith('.pdf'):
+                print(f"=== PROCESSING FILE {i+1}/{len(files)}: {f.filename} ===")
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
                     f.save(tmp_file.name)
+                    print(f"=== FILE SAVED TO TEMP: {tmp_file.name} ===")
                     try:
-                        results.append(parser.parse_pdf_to_structured_data(tmp_file.name))
+                        print(f"=== STARTING PARSING: {f.filename} ===")
+                        result = parser.parse_pdf_to_structured_data(tmp_file.name)
+                        print(f"=== PARSING COMPLETED: {f.filename}, Success: {result.get('success')} ===")
+                        results.append(result)
                     finally:
                         os.unlink(tmp_file.name)
+                        print(f"=== TEMP FILE DELETED: {tmp_file.name} ===")
 
+        print(f"=== PROCESSING {len(results)} RESULTS ===")
+        
         df = parser.create_dataframe(results[0]['structured_data'] if results else [])
-        summary = parser.generate_summary_report(df) if hasattr(df, "empty") and not df.empty else {}
+        print(f"=== DATAFRAME CREATED, SHAPE: {df.shape if hasattr(df, 'shape') else 'N/A'} ===")
+        
+        # Generate basic summary since generate_summary_report method doesn't exist
+        summary = {
+            'total_rows': len(df) if hasattr(df, "empty") and not df.empty else 0,
+            'columns': list(df.columns) if hasattr(df, "empty") and not df.empty else [],
+            'data_types': {col: str(dtype) for col, dtype in df.dtypes.items()} if hasattr(df, "empty") and not df.empty else {}
+        }
+        print(f"=== SUMMARY CREATED: {summary} ===")
+
+        # Add export_data for consistency with single PDF endpoint
+        export_data = results[0]['structured_data'] if results and results[0].get('success') else []
+        total_rows = len(export_data)
+        # Add transactions field for frontend compatibility
+        transactions = export_data
+        print(f"=== EXPORT DATA PREPARED: {len(export_data)} items ===")
 
         supabase_saved = False
         if SUPABASE_ENABLED:
             try:
+                print("=== SAVING TO SUPABASE ===")
                 supabase_result = supabase_manager.save_multiple_expenses(results)
                 supabase_saved = supabase_result.get('success', False)
-            except Exception:
+                print(f"=== SUPABASE SAVE RESULT: {supabase_saved} ===")
+            except Exception as e:
+                print(f"=== SUPABASE SAVE ERROR: {e} ===")
                 supabase_saved = False
 
-        return jsonify({
+        response_data = {
             'results': results,
             'summary': summary,
             'total_files': len(files),
             'successful_files': len([r for r in results if r.get('success')]),
-            'supabase_saved': supabase_saved
-        })
+            'supabase_saved': supabase_saved,
+            'export_data': export_data,      # ✅ Added for consistency
+            'total_rows': total_rows,        # ✅ Added for consistency
+            'transactions': transactions,    # ✅ Added for frontend compatibility
+            'success': len([r for r in results if r.get('success')]) > 0  # ✅ Added success flag
+        }
+        
+        print("=== PREPARING JSON RESPONSE ===")
+        print(f"=== RESPONSE DATA KEYS: {list(response_data.keys())} ===")
+        print("=== SENDING RESPONSE ===")
+        
+        return jsonify(response_data)
     except Exception as e:
+        print(f"=== MULTIPLE PDFS ENDPOINT ERROR: {e} ===")
+        print(f"=== ERROR TYPE: {type(e).__name__} ===")
+        import traceback
+        print(f"=== TRACEBACK: {traceback.format_exc()} ===")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/export-csv', methods=['POST'])
@@ -167,9 +217,7 @@ def export_pdf_data_csv_endpoint():
         if not pdf_data:
             return jsonify({'error': 'Brak danych PDF do eksportu'}), 400
         
-        print(f"🔍 PDF CSV export: Received {len(pdf_data)} rows")
-        if pdf_data:
-            print(f"🔍 First row keys: {list(pdf_data[0].keys()) if isinstance(pdf_data[0], dict) else 'Not a dict'}")
+
 
         # Convert to DataFrame
         try:
@@ -202,9 +250,7 @@ def export_excel_endpoint():
         if not expenses:
             return jsonify({'error': 'Brak danych do eksportu'}), 400
         
-        print(f"🔍 Excel export: Received {len(expenses)} expenses")
-        if expenses:
-            print(f"🔍 First expense keys: {list(expenses[0].keys()) if isinstance(expenses[0], dict) else 'Not a dict'}")
+
 
         # Convert to DataFrame first for universal parser
         try:
@@ -265,9 +311,7 @@ def export_pdf_data_excel_endpoint():
         if not pdf_data:
             return jsonify({'error': 'Brak danych PDF do eksportu'}), 400
         
-        print(f"🔍 PDF Excel export: Received {len(pdf_data)} rows")
-        if pdf_data:
-            print(f"🔍 First row keys: {list(pdf_data[0].keys()) if isinstance(pdf_data[0], dict) else 'Not a dict'}")
+
 
         # Convert to DataFrame
         try:
@@ -405,7 +449,7 @@ def analyze_endpoint():
         summary = {
             'total_rows': len(df),
             'columns': list(df.columns),
-            'data_types': df.dtypes.to_dict(),
+            'data_types': {col: str(dtype) for col, dtype in df.dtypes.items()},
             'non_empty_counts': {col: df[col].astype(str).str.strip().ne('').sum() for col in df.columns}
         }
         return jsonify({'summary': summary, 'success': True})
